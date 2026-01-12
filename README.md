@@ -41,9 +41,14 @@ winget install --id JohnMacFarlane.Pandoc -e --accept-source-agreements --accept
 ## Setup Python environment
 From the repo root (`qwen/` folder):
 ```powershell
-py -m venv .venv
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+```
+
+**Note:** If you get an execution policy error when activating the venv, run:
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
 ## Configure
