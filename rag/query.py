@@ -10,6 +10,12 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 
+try:
+    from langchain_community.document_compressors.flashrank_rerank import FlashrankRerank
+    RERANKING_AVAILABLE = True
+except ImportError:
+    RERANKING_AVAILABLE = False
+
 
 def format_docs(docs: List[Document]) -> str:
     return "\n\n".join(f"[Source: {d.metadata.get('source', 'unknown')}]\n{d.page_content}" for d in docs)
@@ -34,15 +40,43 @@ def main() -> None:
     print(f"Loading Chroma from: {chroma_dir}")
     embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
     vectorstore = Chroma(persist_directory=str(chroma_dir), embedding_function=embeddings)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-
+    
+    # Retrieve more chunks initially, then rerank for relevance
+    k_chunks = int(os.getenv("RETRIEVAL_CHUNKS", "12"))  # Retrieve more
+    top_n = int(os.getenv("TOP_N_RERANK", "6"))  # Keep best after reranking
+    use_reranking = os.getenv("USE_RERANKING", "true").lower() == "true"
+    
+    base_retriever = vectorstore.as_retriever(search_kwargs={"k": k_chunks})
+    
     print("Retrieving context...")
-    # In LangChain 1.x, retrievers are Runnables; use invoke()
-    docs = retriever.invoke(query)
+    docs = base_retriever.invoke(query)
+    
+    # Manual reranking implementation
+    if use_reranking and RERANKING_AVAILABLE and len(docs) > 0:
+        print(f"Using reranking to select top {top_n} from {len(docs)} chunks...")
+        try:
+            compressor = FlashrankRerank(top_n=top_n, model="ms-marco-MiniLM-L-12-v2")
+            docs = compressor.compress_documents(docs, query)
+            print(f"Reranked to {len(docs)} most relevant chunks")
+        except Exception as e:
+            print(f"Reranking failed ({e}), using all retrieved chunks")
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful assistant. Use the provided context to answer. If unsure, say you don't know."),
-        ("human", "Question: {question}\n\nContext:\n{context}\n\nAnswer concisely.")
+        ("system", """You are an expert assistant that provides accurate, detailed answers based on the given context.
+
+Instructions:
+- Answer ONLY using information from the provided context
+- Quote specific passages when making claims
+- If the context doesn't contain enough information, clearly state what's missing
+- Structure your answer with clear reasoning
+- Include relevant numbers, dates, and specific details from the context
+- If multiple sources provide different information, mention this"""),
+        ("human", """Question: {question}
+
+Context:
+{context}
+
+Provide a comprehensive answer based on the context above:""")
     ])
 
     llm = ChatOllama(model=model_name, base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
