@@ -41,9 +41,8 @@ def main() -> None:
     embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
     vectorstore = Chroma(persist_directory=str(chroma_dir), embedding_function=embeddings)
     
-    # Retrieve more chunks initially, then rerank for relevance
-    k_chunks = int(os.getenv("RETRIEVAL_CHUNKS", "12"))  # Retrieve more
-    top_n = int(os.getenv("TOP_N_RERANK", "6"))  # Keep best after reranking
+    k_chunks = int(os.getenv("RETRIEVAL_CHUNKS", "12"))
+    top_n = int(os.getenv("TOP_N_RERANK", "6"))
     use_reranking = os.getenv("USE_RERANKING", "true").lower() == "true"
     
     base_retriever = vectorstore.as_retriever(search_kwargs={"k": k_chunks})
@@ -51,7 +50,6 @@ def main() -> None:
     print("Retrieving context...")
     docs = base_retriever.invoke(query)
     
-    # Manual reranking implementation
     if use_reranking and RERANKING_AVAILABLE and len(docs) > 0:
         print(f"Using reranking to select top {top_n} from {len(docs)} chunks...")
         try:

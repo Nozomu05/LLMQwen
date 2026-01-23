@@ -1,4 +1,7 @@
 import os
+import zipfile
+import shutil
+import tempfile
 from pathlib import Path
 from dotenv import load_dotenv
 from typing import List
@@ -10,7 +13,8 @@ from langchain_community.document_loaders import (
     Docx2txtLoader, 
     UnstructuredODTLoader,
     PyMuPDFLoader,
-    UnstructuredPDFLoader
+    UnstructuredPDFLoader,
+    UnstructuredMarkdownLoader
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import FastEmbedEmbeddings
@@ -18,16 +22,53 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
 
+def extract_zip_files(docs_dir: Path) -> None:
+    zip_files = list(docs_dir.glob("**/*.zip"))
+    
+    if not zip_files:
+        return
+    
+    print(f"\nFound {len(zip_files)} ZIP file(s) to extract...\n")
+    
+    for zip_path in zip_files:
+        try:
+            extract_dir = zip_path.parent / zip_path.stem
+            
+            print(f"Extracting: {zip_path.name}")
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                file_list = zip_ref.namelist()
+                
+                supported_extensions = {'.pptx', '.pdf', '.docx', '.md', '.odt', '.txt'}
+                supported_files = [f for f in file_list 
+                                 if any(f.lower().endswith(ext) for ext in supported_extensions)]
+                
+                if supported_files:
+                    print(f"  → Found {len(supported_files)} supported document(s)")
+                    zip_ref.extractall(extract_dir)
+                    print(f"  ✓ Extracted to: {extract_dir.name}/")
+                else:
+                    print(f"  ⚠ No supported documents found (skipping)")
+                    
+        except zipfile.BadZipFile:
+            print(f"  ✗ Error: {zip_path.name} is not a valid ZIP file")
+        except Exception as e:
+            print(f"  ✗ Error extracting {zip_path.name}: {e}")
+    
+    print()
+
+
 def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> List[Document]:
-    """Load documents in batches to avoid memory issues with large files."""
     all_docs = []
     
     loaders_config = [
-        ("**/*.md", TextLoader, "Markdown"),
+        ("**/*.md", UnstructuredMarkdownLoader, "Markdown"),
         ("**/*.txt", TextLoader, "Text"),
-        ("**/*.pdf", None, "PDF"),  # Special handling
+        ("**/*.pdf", None, "PDF"),
         ("**/*.pptx", UnstructuredPowerPointLoader, "PowerPoint"),
+        ("**/*.ppt", UnstructuredPowerPointLoader, "PowerPoint (legacy)"),
         ("**/*.docx", Docx2txtLoader, "Word"),
+        ("**/*.doc", Docx2txtLoader, "Word (legacy)"),
         ("**/*.odt", UnstructuredODTLoader, "ODT"),
     ]
     
@@ -35,7 +76,6 @@ def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> List[Document]
         print(f"Loading {doc_type} files...")
         
         if doc_type == "PDF":
-            # Use PyMuPDF for better table/image support
             pdf_files = list(docs_dir.glob(glob_pattern))
             for pdf_file in pdf_files:
                 try:
@@ -45,13 +85,12 @@ def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> List[Document]
                     print(f"  ✓ Loaded: {pdf_file.name} ({len(docs)} pages)")
                 except Exception as e:
                     print(f"  ✗ Error loading {pdf_file.name}: {e}")
-                    # Fallback to UnstructuredPDFLoader for complex PDFs
                     try:
                         print(f"  → Trying UnstructuredPDFLoader for {pdf_file.name}...")
                         loader = UnstructuredPDFLoader(
                             str(pdf_file),
-                            mode="elements",  # Extract tables and images
-                            strategy="hi_res"  # High resolution for tables
+                            mode="elements",
+                            strategy="hi_res"
                         )
                         docs = loader.load()
                         all_docs.extend(docs)
@@ -88,26 +127,26 @@ def main() -> None:
     if not docs_dir.exists():
         docs_dir.mkdir(parents=True, exist_ok=True)
         print(f"Created empty docs directory at: {docs_dir}")
-        print("Add .md, .txt, .pdf, .pptx, .docx, or .odt files and re-run this command.")
+        print("Add .md, .txt, .pdf, .pptx, .docx, .odt files or .zip archives and re-run this command.")
         return
 
     print(f"Loading documents from: {docs_dir}")
     print(f"Batch size: {batch_size} | Chunk size: {chunk_size} | Overlap: {chunk_overlap}\n")
 
-    # Load documents with batch processing
+    extract_zip_files(docs_dir)
+
     all_docs = load_documents_batch(docs_dir, batch_size)
 
     if not all_docs:
-        print("\nNo documents found. Add .md, .txt, .pdf, .pptx, .docx, or .odt files to the docs folder.")
+        print("\nNo documents found. Add .md, .txt, .pdf, .pptx, .docx, .odt files or .zip archives to the docs folder.")
         return
 
     print(f"\nLoaded {len(all_docs)} total documents. Splitting into chunks...")
     
-    # Use larger chunks for better context preservation
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ". ", " ", ""]  # Better splitting for structured content
+        separators=["\n\n", "\n", ". ", " ", ""]
     )
     chunks = splitter.split_documents(all_docs)
     print(f"Created {len(chunks)} chunks.")
@@ -117,7 +156,6 @@ def main() -> None:
     chroma_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nBuilding Chroma index at: {chroma_dir}")
 
-    # Process in batches to avoid memory issues
     print(f"Processing {len(chunks)} chunks in batches of {batch_size}...")
     
     if len(chunks) <= batch_size:
@@ -127,7 +165,6 @@ def main() -> None:
             persist_directory=str(chroma_dir),
         )
     else:
-        # First batch creates the vectorstore
         vectorstore = Chroma.from_documents(
             documents=chunks[:batch_size],
             embedding=embeddings,
@@ -135,7 +172,6 @@ def main() -> None:
         )
         print(f"  ✓ Processed batch 1/{(len(chunks) + batch_size - 1) // batch_size}")
         
-        # Remaining batches are added
         for i in range(batch_size, len(chunks), batch_size):
             batch = chunks[i:i + batch_size]
             vectorstore.add_documents(batch)
