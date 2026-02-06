@@ -117,8 +117,7 @@ def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> List[Document]
         if doc_type == "PDF":
             pdf_files = list(docs_dir.glob(glob_pattern))
             if pdf_files:
-                # Parallel PDF loading with more workers for large document sets
-                max_workers = min(8, len(pdf_files))  # Scale workers based on file count
+                max_workers = min(8, len(pdf_files))  
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {executor.submit(load_pdf, pdf_file): pdf_file for pdf_file in pdf_files}
                     for future in as_completed(futures):
@@ -164,7 +163,6 @@ def main() -> None:
         print("Add .md, .txt, .pdf, .pptx, .docx, .odt files or .zip archives and re-run this command.")
         return
 
-    # Check if we can skip ingestion based on cache
     current_hash = get_directory_hash(docs_dir)
     if cache_file.exists() and chroma_dir.exists():
         try:
@@ -201,7 +199,6 @@ def main() -> None:
     chunks = splitter.split_documents(all_docs)
     print(f"Created {len(chunks)} chunks in {time.time() - start_split:.2f}s")
 
-    # Use faster embedding model if specified
     use_faster = os.getenv("USE_FASTER_EMBEDDINGS", "false").lower() == "true"
     embed_model = "BAAI/bge-small-en-v1.5" if not use_faster else "sentence-transformers/all-MiniLM-L6-v2"
     embeddings = FastEmbedEmbeddings(model_name=embed_model, max_length=512)
@@ -238,7 +235,7 @@ def main() -> None:
     print(f"\n✓ Ingestion complete in {time.time() - start_index:.2f}s. Vector store is ready for querying.")
     print(f"Total chunks indexed: {len(chunks)}")
     
-    # Save cache
+  
     try:
         with open(cache_file, 'w') as f:
             json.dump({

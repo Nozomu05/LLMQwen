@@ -41,6 +41,7 @@ Thumbs.db
 # Project specific
 storage/chroma/
 docs/
+storage/.ingest_cache.json
 
 # Office temporary files
 ~$*
