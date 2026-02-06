@@ -9,6 +9,19 @@ from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
+import time
+
+try:
+    from langchain_mistralai import ChatMistralAI
+    MISTRAL_AVAILABLE = True
+except ImportError:
+    MISTRAL_AVAILABLE = False
+
+try:
+    from langchain_openai import ChatOpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 try:
     from langchain_community.document_compressors.flashrank_rerank import FlashrankRerank
@@ -21,11 +34,47 @@ def format_docs(docs: List[Document]) -> str:
     return "\n\n".join(f"[Source: {d.metadata.get('source', 'unknown')}]\n{d.page_content}" for d in docs)
 
 
+def get_llm(provider: str):
+    """Get LLM instance based on provider configuration."""
+    if provider == "ollama":
+        model_name = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct")
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        return ChatOllama(model=model_name, base_url=base_url), model_name
+    
+    elif provider == "mistral":
+        if not MISTRAL_AVAILABLE:
+            print("Error: Mistral support not available. Install with: pip install langchain-mistralai")
+            sys.exit(1)
+        api_key = os.getenv("MISTRAL_API_KEY")
+        if not api_key or api_key == "your_mistral_api_key_here":
+            print("Error: MISTRAL_API_KEY not set in .env file")
+            sys.exit(1)
+        model_name = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+        return ChatMistralAI(model=model_name, api_key=api_key, temperature=0), model_name
+    
+    elif provider == "openai":
+        if not OPENAI_AVAILABLE:
+            print("Error: OpenAI support not available. Install with: pip install langchain-openai")
+            sys.exit(1)
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key or api_key == "your_openai_api_key_here":
+            print("Error: OPENAI_API_KEY not set in .env file")
+            sys.exit(1)
+        model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        return ChatOpenAI(model=model_name, api_key=api_key, temperature=0), model_name
+    
+    else:
+        print(f"Error: Unknown provider '{provider}'. Use: ollama, mistral, or openai")
+        sys.exit(1)
+
+
 def main() -> None:
     load_dotenv()
 
     chroma_dir = Path(os.getenv("CHROMA_DIR", "storage/chroma")).resolve()
-    model_name = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct")
+    provider = os.getenv("MODEL_PROVIDER", "ollama").lower()
+    
+    print(f"Using provider: {provider}")
 
     if not chroma_dir.exists():
         print(f"Vector store directory not found: {chroma_dir}")
@@ -38,8 +87,14 @@ def main() -> None:
         sys.exit(1)
 
     print(f"Loading Chroma from: {chroma_dir}")
-    embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+    
+    use_faster = os.getenv("USE_FASTER_EMBEDDINGS", "false").lower() == "true"
+    embed_model = "BAAI/bge-small-en-v1.5" if not use_faster else "sentence-transformers/all-MiniLM-L6-v2"
+    
+    start_time = time.time()
+    embeddings = FastEmbedEmbeddings(model_name=embed_model, max_length=512)
     vectorstore = Chroma(persist_directory=str(chroma_dir), embedding_function=embeddings)
+    print(f"Loaded in {time.time() - start_time:.2f}s")
     
     k_chunks = int(os.getenv("RETRIEVAL_CHUNKS", "12"))
     top_n = int(os.getenv("TOP_N_RERANK", "6"))
@@ -60,30 +115,47 @@ def main() -> None:
             print(f"Reranking failed ({e}), using all retrieved chunks")
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are an expert assistant that provides accurate, detailed answers based on the given context.
+        ("system", """You are an expert assistant that provides accurate, deeply reasoned answers based on the given context.
 
 Instructions:
 - Answer ONLY using information from the provided context
-- Quote specific passages when making claims
-- If the context doesn't contain enough information, clearly state what's missing
-- Structure your answer with clear reasoning
-- Include relevant numbers, dates, and specific details from the context
-- If multiple sources provide different information, mention this"""),
+- Use step-by-step reasoning: analyze the question, identify relevant information, synthesize conclusions
+- Compare and contrast different approaches or perspectives found in the context
+- Identify implications, trade-offs, and relationships between concepts
+- Quote specific passages when making claims and cite the source
+- Break down complex topics into clear sections with logical flow
+- Include ALL relevant numbers, dates, technical terms, and specific details
+- Explain WHY things work the way they do, not just WHAT they are
+- When evaluating suggestions or proposals: assess feasibility, identify gaps, compare with existing work
+- If the context provides examples, analyze them and explain their significance
+- If multiple sources provide different information, analyze the differences and explain why they might exist
+- If the context doesn't contain enough information, explain what's missing and why it matters
+- Use analytical frameworks: pros/cons, before/after, cause/effect"""),
         ("human", """Question: {question}
 
 Context:
 {context}
 
-Provide a comprehensive answer based on the context above:""")
+Provide a comprehensive, deeply reasoned answer:
+1. First, analyze what the question is really asking
+2. Then, examine the relevant information from the context
+3. Finally, synthesize your conclusions with clear reasoning and evidence""")
     ])
 
-    llm = ChatOllama(model=model_name, base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
+    llm, model_name = get_llm(provider)
     chain = prompt | llm
 
     print(f"Querying model: {model_name}\n")
     context_text = format_docs(docs)
+    
+    print("=== Answer ===\n")
+    query_start = time.time()
+    
     try:
-        result = chain.invoke({"question": query, "context": context_text})
+        for chunk in chain.stream({"question": query, "context": context_text}):
+            print(chunk.content, end="", flush=True)
+        print(f"\n\n[Query completed in {time.time() - query_start:.2f}s]")
+        return
     except Exception as e:
         msg = str(e).lower()
         if "model" in msg and "not found" in msg:
@@ -95,9 +167,6 @@ Provide a comprehensive answer based on the context above:""")
             print("Re-run the query after pulling.")
             sys.exit(1)
         raise
-
-    print("=== Answer ===\n")
-    print(result.content)
 
     print("\n=== Sources ===")
     for i, d in enumerate(docs, 1):

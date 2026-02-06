@@ -40,10 +40,13 @@ Thumbs.db
 
 # Project specific
 storage/chroma/
+docs/
 
 # Office temporary files
 ~$*
 *.tmp
+
+
 
 #Ignore vscode AI rules
 .github\instructions\codacy.instructions.md
