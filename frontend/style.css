@@ -1,0 +1,26 @@
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif; background: radial-gradient(1200px 800px at 10% -10%, #dfe8ff 0%, #f7f8fc 45%, #ffffff 100%); color: #1c2130; }
+.wrap { max-width: 980px; margin: 40px auto; padding: 24px; }
+.card { background: rgba(255, 255, 255, 0.92); border: 1px solid rgba(150, 160, 190, 0.25); border-radius: 22px; box-shadow: 0 20px 60px rgba(26, 32, 44, 0.12); padding: 28px; backdrop-filter: blur(6px); }
+.title { font-size: 28px; font-weight: 700; margin: 0 0 6px; }
+.subtitle { color: #5d677f; margin: 0 0 18px; }
+.status { margin: 12px 0 16px; color: #6b7280; font-size: 14px; }
+.chat { background: #f5f6fb; border: 1px solid rgba(148, 163, 184, 0.4); border-radius: 16px; padding: 18px; height: 500px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.message { max-width: 85%; padding: 12px 14px; border-radius: 14px; line-height: 1.6; word-wrap: break-word; overflow-wrap: break-word; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08); }
+.message.user { align-self: flex-end; background: linear-gradient(135deg, #4f78ff, #6cc8ff); color: #ffffff; border-bottom-right-radius: 6px; white-space: normal; }
+.message.assistant { align-self: flex-start; background: #ffffff; color: #1f2937; border: 1px solid rgba(148, 163, 184, 0.35); border-bottom-left-radius: 6px; white-space: normal; }
+.message.assistant h2 { margin: 12px 0 8px 0; font-size: 18px; font-weight: 700; color: #1f2937; }
+.message.assistant h3 { margin: 10px 0 6px 0; font-size: 15px; font-weight: 700; color: #374151; }
+.message.assistant p { margin: 6px 0; }
+.message.assistant li { margin: 4px 0 4px 18px; }
+.message.assistant ul { margin: 4px 0; padding-left: 18px; }
+.message.assistant strong { font-weight: 700; }
+.message.assistant em { font-style: italic; }
+.meta { margin-top: 8px; font-size: 12px; color: #6b7280; white-space: pre-wrap; }
+.composer { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
+.input { flex: 1; padding: 14px 16px; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.6); background: #ffffff; color: #0f172a; font-size: 15px; }
+.button { padding: 14px 18px; border: none; border-radius: 12px; background: linear-gradient(135deg, #1f4bff, #4ec2ff); color: #ffffff; font-weight: 700; cursor: pointer; transition: transform 0.15s ease, box-shadow 0.15s ease; }
+.button:disabled { cursor: not-allowed; opacity: 0.6; }
+.button:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(79, 120, 255, 0.25); }
+.footer { margin-top: 18px; color: #7a8399; font-size: 12px; }

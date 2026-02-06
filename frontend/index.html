@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAG Chatbot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1 class="title">RAG Chatbot</h1>
+      <p class="subtitle">Ask questions and review sources in a clean, conversational UI.</p>
+      <div id="status" class="status">Ready</div>
+      <div id="chat" class="chat"></div>
+      <div class="composer">
+        <input id="question" class="input" placeholder="Type your question..." />
+        <button id="ask" class="button">Send</button>
+      </div>
+      <div class="footer">Tip: make sure Ollama is running if you use the local provider.</div>
+    </div>
+  </div>
+    <script src="script.js?v=6"></script>
+</body>
+</html>

@@ -26,7 +26,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def extract_zip_files(docs_dir: Path) -> None:
-    """Extract zip files recursively, handling nested zips."""
     zip_files = list(docs_dir.glob("**/*.zip"))
     
     if not zip_files:
@@ -98,7 +97,6 @@ def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> List[Document]
     ]
     
     def load_pdf(pdf_file):
-        """Load single PDF with fallback."""
         try:
             loader = PyMuPDFLoader(str(pdf_file))
             docs = loader.load()
@@ -117,7 +115,7 @@ def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> List[Document]
         if doc_type == "PDF":
             pdf_files = list(docs_dir.glob(glob_pattern))
             if pdf_files:
-                max_workers = min(8, len(pdf_files))  
+                max_workers = min(8, len(pdf_files))
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {executor.submit(load_pdf, pdf_file): pdf_file for pdf_file in pdf_files}
                     for future in as_completed(futures):
@@ -248,7 +246,6 @@ def main() -> None:
 
 
 def get_directory_hash(directory: Path) -> str:
-    """Generate hash of all files in directory for caching."""
     hasher = hashlib.md5()
     try:
         for file_path in sorted(directory.rglob('*.zip')):

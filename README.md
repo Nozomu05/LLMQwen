@@ -64,12 +64,122 @@ Copy-Item .env.example .env
 
 ### Key Configuration Options:
 - `MODEL_PROVIDER` – Choose: `ollama`, `mistral`, or `openai`
-- `OLLAMA_MODEL` – default is `qwen2.5:3b-instruct`
+- `OLLAMA_MODEL` – default is `qwen2.5:7b-instruct`
 - `MISTRAL_API_KEY` / `OPENAI_API_KEY` – For cloud providers
 - `DOCS_DIR` – folder with your documents (default: `docs`)
 - `CHROMA_DIR` – vector DB storage (default: `storage/chroma`)
-- `RETRIEVAL_CHUNKS` – how many chunks to retrieve (default: 12)
+- `RETRIEVAL_CHUNKS` – initial chunks to retrieve (default: 100)
+- `TOP_N_RERANK` – final chunks sent to LLM (default: 8)
 - `USE_RERANKING` – enable for better accuracy (default: true)
+
+---
+
+## 🔍 How the RAG Pipeline Works
+
+Understanding the retrieval and reranking process:
+
+### The 3-Step Process
+
+```
+📚 Your Database (3,000+ chunks)
+         ↓
+    STEP 1: Semantic Search (RETRIEVAL_CHUNKS)
+         ↓
+    Top 100 similar chunks
+         ↓
+    STEP 2: Reranking (TOP_N_RERANK)
+         ↓
+    Best 8 relevant chunks
+         ↓
+    STEP 3: LLM generates answer
+```
+
+### Detailed Explanation
+
+**Step 1: Semantic Search (`RETRIEVAL_CHUNKS`)**
+- Searches **ALL documents** in your database
+- Compares your question's embedding to every chunk's embedding
+- Returns the most **similar** chunks
+- Example: Top 100 most similar chunks from 3,000+ total
+- ⚡ Fast - uses vector similarity
+
+**Step 2: Reranking (`TOP_N_RERANK`)**
+- Takes the chunks from Step 1
+- Uses Flashrank model to re-score them more accurately
+- Keeps only the **best** chunks
+- Example: Best 8 out of 100
+- ⚠️ **RAM Usage:** ~12.5 MB per chunk being reranked
+- 🎯 More accurate than semantic search alone
+
+**Step 3: LLM Processing**
+- LLM receives only `TOP_N_RERANK` chunks
+- Generates answer based on those chunks
+- Model must handle context size without being overwhelmed
+
+### Configuration Guidelines
+
+**RETRIEVAL_CHUNKS** (Cast a wide net):
+- Searches across all documents, returns top N most similar
+- **Recommended:** 100-200 for good coverage
+- **Max by RAM:** 
+  - 8GB RAM → 300 chunks max
+  - 16GB RAM → 700 chunks max
+  - 32GB RAM → 1,500 chunks max
+- ⚠️ Higher values = more RAM used in reranking step
+
+**TOP_N_RERANK** (Final chunks to LLM):
+- **qwen2.5:7b** → 6-8 chunks (optimal, model overwhelmed beyond this)
+- **qwen2.5:14b** → 12-15 chunks
+- **qwen2.5:32b** → 25-30 chunks
+- ⚠️ **More chunks ≠ better answers** with smaller models!
+
+### Why This Design?
+
+**You cannot send all documents to the LLM:**
+- 1,000+ documents = millions of tokens
+- LLMs have context limits (8k-128k tokens)
+- Would be extremely slow and expensive
+
+**RAG solution:**
+- Semantic search already "sees" all documents
+- Retrieves most relevant subset
+- Reranking filters to highest quality
+- LLM gets focused, relevant context
+
+---
+
+## 🌍 Why No Multilingual Support?
+
+This project **does not include automatic multilingual support** for a good reason:
+
+### ⚠️ Small Models Perform Poorly in Non-English Languages
+
+**Current Model (`qwen2.5:7b-instruct`):**
+- Trained predominantly on English data
+- **Significantly worse quality** in other languages
+- Non-English responses are often less detailed, less accurate, and miss important nuances
+- Translation overhead reduces reasoning capacity
+
+**Why Small Models Struggle:**
+- Most training data is English (70-90% of training corpus)
+- 7B parameters aren't enough for strong multilingual capabilities
+- Model spends cognitive capacity on translation instead of reasoning
+
+### 🚀 If You Need Multilingual Support
+
+**Option 1: Use larger Qwen models (14B+)**
+```powershell
+ollama pull qwen2.5:14b-instruct  # Better multilingual
+ollama pull qwen2.5:32b-instruct  # Best multilingual
+```
+
+**Option 2: Use specialized multilingual models**
+```powershell
+ollama pull aya-23:8b    # Optimized for 23 languages
+ollama pull aya-23:35b   # Best multilingual performance
+```
+
+**Recommendation:** For production use with multiple languages, upgrade to 14B+ models or use Aya. Otherwise, **ask questions in English for best results**.
 
 ---
 
@@ -216,6 +326,8 @@ This will:
 **Supported formats:** PDF, Word (.docx), PowerPoint (.pptx), Markdown (.md), Text (.txt), ODT (.odt)
 
 ## Ask questions (RAG)
+
+### Option 1: Command Line Interface (CLI)
 ```powershell
 python .\rag\query.py "What does this project do?"
 ```
@@ -225,6 +337,24 @@ The script:
 - Uses streaming responses (answer appears immediately)
 - Shows query completion time
 - Cites sources from your documents
+- Automatically detects language and responds accordingly
+
+### Option 2: Web Interface (Graphical)
+```powershell
+python .\frontend\app.py
+```
+
+Then open your browser to: **http://localhost:8000**
+
+The web interface provides:
+- Clean, user-friendly chat interface
+- Real-time streaming responses
+- Source citations with document links
+- Language auto-detection (ask in any language)
+- Provider and model information displayed
+- No terminal needed - just type and ask!
+
+**To stop the server:** Press `Ctrl+C` in the terminal
 
 ## Upgrading to Qwen 8B later
 When you have a GPU, pull and use a larger model:

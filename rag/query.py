@@ -35,9 +35,8 @@ def format_docs(docs: List[Document]) -> str:
 
 
 def get_llm(provider: str):
-    """Get LLM instance based on provider configuration."""
     if provider == "ollama":
-        model_name = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct")
+        model_name = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         return ChatOllama(model=model_name, base_url=base_url), model_name
     
@@ -66,6 +65,71 @@ def get_llm(provider: str):
     else:
         print(f"Error: Unknown provider '{provider}'. Use: ollama, mistral, or openai")
         sys.exit(1)
+
+
+def run_query_complete(question: str, provider: str = "ollama") -> tuple[str, str, List[str]]:
+    load_dotenv()
+    
+    chroma_dir = Path(os.getenv("CHROMA_DIR", "storage/chroma")).resolve()
+    
+    if not chroma_dir.exists():
+        raise FileNotFoundError(f"Vector store not found at {chroma_dir}. Run ingestion first.")
+    
+    use_faster = os.getenv("USE_FASTER_EMBEDDINGS", "false").lower() == "true"
+    embed_model = "BAAI/bge-small-en-v1.5" if not use_faster else "sentence-transformers/all-MiniLM-L6-v2"
+    embeddings = FastEmbedEmbeddings(model_name=embed_model, max_length=512)
+    vectorstore = Chroma(persist_directory=str(chroma_dir), embedding_function=embeddings)
+    
+    k_chunks = int(os.getenv("RETRIEVAL_CHUNKS", "100"))
+    top_n = int(os.getenv("TOP_N_RERANK", "8"))
+    use_reranking = os.getenv("USE_RERANKING", "true").lower() == "true"
+    
+    base_retriever = vectorstore.as_retriever(search_kwargs={"k": k_chunks})
+    docs = base_retriever.invoke(question)
+    
+    if use_reranking and RERANKING_AVAILABLE and len(docs) > 0:
+        try:
+            compressor = FlashrankRerank(top_n=top_n, model="ms-marco-MiniLM-L-12-v2")
+            docs = compressor.compress_documents(docs, question)
+        except Exception:
+            pass
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are an expert assistant that provides accurate, deeply reasoned answers based on the given context.
+
+Instructions:
+- Answer ONLY using information from the provided context
+- Use step-by-step reasoning: analyze the question, identify relevant information, synthesize conclusions
+- Compare and contrast different approaches or perspectives found in the context
+- Identify implications, trade-offs, and relationships between concepts
+- Quote specific passages when making claims and cite the source
+- Break down complex topics into clear sections with logical flow
+- Include ALL relevant numbers, dates, technical terms, and specific details
+- Explain WHY things work the way they do, not just WHAT they are
+- When evaluating suggestions or proposals: assess feasibility, identify gaps, compare with existing work
+- If the context provides examples, analyze them and explain their significance
+- If multiple sources provide different information, analyze the differences and explain why they might exist
+- If the context doesn't contain enough information, explain what's missing and why it matters
+- Use analytical frameworks: pros/cons, before/after, cause/effect"""),
+        ("human", """Question: {question}
+
+Context:
+{context}
+
+Provide a comprehensive, deeply reasoned answer:
+1. First, analyze what the question is really asking
+2. Then, examine the relevant information from the context
+3. Finally, synthesize your conclusions with clear reasoning and evidence""")
+    ])
+    
+    llm, model_name = get_llm(provider)
+    chain = prompt | llm
+    context_text = format_docs(docs)
+    result = chain.invoke({"question": question, "context": context_text})
+    
+    sources = [d.metadata.get("source", "unknown") for d in docs]
+    
+    return result.content, model_name, sources
 
 
 def main() -> None:
