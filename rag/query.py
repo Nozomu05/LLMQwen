@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List
 
 from dotenv import load_dotenv
-from langchain_ollama import ChatOllama
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -75,9 +75,17 @@ def run_query_complete(question: str, provider: str = "ollama") -> tuple[str, st
     if not chroma_dir.exists():
         raise FileNotFoundError(f"Vector store not found at {chroma_dir}. Run ingestion first.")
     
-    use_faster = os.getenv("USE_FASTER_EMBEDDINGS", "false").lower() == "true"
-    embed_model = "BAAI/bge-small-en-v1.5" if not use_faster else "sentence-transformers/all-MiniLM-L6-v2"
-    embeddings = FastEmbedEmbeddings(model_name=embed_model, max_length=512)
+    embedding_provider = os.getenv("EMBEDDING_PROVIDER", "fastembed").lower()
+    
+    if embedding_provider == "ollama":
+        embedding_model = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        embeddings = OllamaEmbeddings(model=embedding_model, base_url=base_url)
+    else:  
+        use_faster = os.getenv("USE_FASTER_EMBEDDINGS", "false").lower() == "true"
+        embed_model = "BAAI/bge-small-en-v1.5" if not use_faster else "sentence-transformers/all-MiniLM-L6-v2"
+        embeddings = FastEmbedEmbeddings(model_name=embed_model, max_length=512)
+    
     vectorstore = Chroma(persist_directory=str(chroma_dir), embedding_function=embeddings)
     
     k_chunks = int(os.getenv("RETRIEVAL_CHUNKS", "100"))
@@ -152,11 +160,18 @@ def main() -> None:
 
     print(f"Loading Chroma from: {chroma_dir}")
     
-    use_faster = os.getenv("USE_FASTER_EMBEDDINGS", "false").lower() == "true"
-    embed_model = "BAAI/bge-small-en-v1.5" if not use_faster else "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_provider = os.getenv("EMBEDDING_PROVIDER", "ollama").lower()
     
     start_time = time.time()
-    embeddings = FastEmbedEmbeddings(model_name=embed_model, max_length=512)
+    if embedding_provider == "ollama":
+        embedding_model = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        embeddings = OllamaEmbeddings(model=embedding_model, base_url=base_url)
+    else:
+        use_faster = os.getenv("USE_FASTER_EMBEDDINGS", "false").lower() == "true"
+        embed_model = "BAAI/bge-small-en-v1.5" if not use_faster else "sentence-transformers/all-MiniLM-L6-v2"
+        embeddings = FastEmbedEmbeddings(model_name=embed_model, max_length=512)
+    
     vectorstore = Chroma(persist_directory=str(chroma_dir), embedding_function=embeddings)
     print(f"Loaded in {time.time() - start_time:.2f}s")
     

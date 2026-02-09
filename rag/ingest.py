@@ -20,6 +20,7 @@ from langchain_community.document_loaders import (
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import FastEmbedEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -113,7 +114,7 @@ def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> List[Document]
         print(f"Loading {doc_type} files...")
         
         if doc_type == "PDF":
-            pdf_files = list(docs_dir.glob(glob_pattern))
+            pdf_files = [f for f in docs_dir.glob(glob_pattern) if not f.name.startswith(('~$', '._'))]
             if pdf_files:
                 max_workers = min(8, len(pdf_files))
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -129,16 +130,25 @@ def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> List[Document]
                             print(f"  ✓ Loaded: {filename} ({len(docs)} pages){fallback_msg}")
         else:
             try:
-                loader = DirectoryLoader(
-                    str(docs_dir), 
-                    glob=glob_pattern, 
-                    loader_cls=loader_cls,
-                    show_progress=True
-                )
-                docs = loader.load()
-                all_docs.extend(docs)
-                if docs:
-                    print(f"  ✓ Loaded {len(docs)} {doc_type} document(s)")
+                all_files = list(docs_dir.glob(glob_pattern))
+                valid_files = [f for f in all_files if not f.name.startswith(('~$', '._'))]
+                
+                if len(valid_files) < len(all_files):
+                    skipped = len(all_files) - len(valid_files)
+                    print(f"  ⚠ Skipping {skipped} temp file(s)")
+                
+                for file_path in valid_files:
+                    try:
+                        loader = loader_cls(str(file_path))
+                        docs = loader.load()
+                        all_docs.extend(docs)
+                    except Exception as e:
+                        print(f"Error loading file {file_path}")
+                        print(f"  ✗ Error loading {doc_type} files: {e}")
+                        continue
+                
+                if valid_files:
+                    print(f"  ✓ Loaded {len([f for f in valid_files])} {doc_type} document(s)")
             except Exception as e:
                 print(f"  ✗ Error loading {doc_type} files: {e}")
     
@@ -197,9 +207,17 @@ def main() -> None:
     chunks = splitter.split_documents(all_docs)
     print(f"Created {len(chunks)} chunks in {time.time() - start_split:.2f}s")
 
-    use_faster = os.getenv("USE_FASTER_EMBEDDINGS", "false").lower() == "true"
-    embed_model = "BAAI/bge-small-en-v1.5" if not use_faster else "sentence-transformers/all-MiniLM-L6-v2"
-    embeddings = FastEmbedEmbeddings(model_name=embed_model, max_length=512)
+    embedding_provider = os.getenv("EMBEDDING_PROVIDER", "ollama").lower()
+    
+    if embedding_provider == "ollama":
+        embedding_model = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        print(f"\nUsing Ollama embeddings: {embedding_model}")
+        embeddings = OllamaEmbeddings(model=embedding_model, base_url=base_url)
+    else:
+        embedding_model = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+        print(f"\nUsing FastEmbed embeddings: {embedding_model}")
+        embeddings = FastEmbedEmbeddings(model_name=embedding_model, max_length=512)
 
     chroma_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nBuilding Chroma index at: {chroma_dir}")
