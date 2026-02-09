@@ -121,7 +121,7 @@ Edit `.env` with your preferred settings:
 **LLM Configuration:**
 ```env
 MODEL_PROVIDER=ollama              # Options: ollama, mistral, openai
-OLLAMA_MODEL=qwen2.5:7b-instruct   # The model for generating answers
+OLLAMA_MODEL=qwen2.5:14b-instruct  # The model for generating answers
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
@@ -133,8 +133,8 @@ EMBEDDING_MODEL=mxbai-embed-large  # Must match during ingestion & query!
 
 **Retrieval Settings:**
 ```env
-RETRIEVAL_CHUNKS=50   # How many chunks to retrieve initially
-TOP_N_RERANK=10       # Final chunks sent to LLM after reranking
+RETRIEVAL_CHUNKS=100  # How many chunks to retrieve initially
+TOP_N_RERANK=15       # Final chunks sent to LLM after reranking
 USE_RERANKING=true    # Enable for better accuracy
 ```
 
@@ -401,6 +401,105 @@ If ingestion fails with "context length exceeded", reduce CHUNK_SIZE.
 
 ### 🖥️ Hardware Impact on Performance
 
+#### 🔍 Understanding CPU, GPU, and RAM Roles
+
+Your RAG system has **3 main operations**, and each hardware component plays a specific role:
+
+**📥 1. INGESTION (Creating Vector Database)**
+```
+Documents → Text Extraction → Chunking → Embedding Creation → Store in ChromaDB
+```
+
+**Component Roles During Ingestion:**
+- **CPU:** 
+  - Reads files from disk (unzipping, PDF parsing)
+  - Splits text into chunks
+  - **Runs embedding model** (mxbai-embed-large) to convert chunks to vectors
+  - Saves vectors to ChromaDB database
+  - **🎯 Impact:** More CPU cores = faster parallel processing (5-15 min for 458 docs)
+  
+- **GPU:** 
+  - **Can accelerate embeddings** if Ollama uses GPU mode
+  - **🎯 Impact:** **5-10x faster ingestion** (1-3 min instead of 5-15 min)
+  - **Note:** Your current RTX 5050 8GB works for embeddings during ingestion!
+  
+- **RAM:** 
+  - Temporarily holds document content and chunks before processing
+  - **🎯 Impact:** 16GB allows processing large document batches smoothly
+  - **Insufficient RAM = system swaps to disk = dramatically slower**
+
+**🔎 2. QUERY RETRIEVAL (Finding Relevant Context)**
+```
+Your Question → Embedding → Search Vector DB → Retrieve Chunks → Rerank → Top 15 Chunks
+```
+
+**Component Roles During Retrieval:**
+- **CPU:** 
+  - Converts your question to an embedding vector
+  - Searches ChromaDB database (vector similarity calculation)
+  - Runs reranking model (Flashrank) on 100 → 15 chunks
+  - **🎯 Impact:** Fast enough (0.5-1 second total) - rarely a bottleneck
+  
+- **GPU:** 
+  - **Not used** for retrieval in this project
+  - Embeddings and reranking run on CPU only
+  - **🎯 Impact:** None
+  
+- **RAM:** 
+  - Loads vector database into memory
+  - Holds 100 retrieved chunks during reranking
+  - **🎯 Impact:** 16GB is more than enough for retrieval
+
+**🤖 3. ANSWER GENERATION (LLM Response)**
+```
+Your Question + Top 15 Chunks → LLM (qwen2.5:14b-instruct) → Detailed Answer
+```
+
+**Component Roles During Answer Generation:**
+- **CPU:** 
+  - **Runs the entire LLM** when GPU is disabled (OLLAMA_NUM_GPU=0)
+  - Processes tokens one-by-one through 14 billion parameters
+  - **🎯 Impact:** 8-15 seconds per answer (slow but works!)
+  
+- **GPU:** 
+  - **Runs the entire LLM** when GPU is enabled (default)
+  - Processes tokens MUCH faster using parallel computation
+  - **🎯 Impact:** **6-10x faster** (1-2 sec instead of 8-15 sec)
+  - **⚠️ Problem:** Your RTX 5050 (8GB VRAM) is too small for 14B model (needs 10GB)
+  - **Why you use CPU mode:** 14B doesn't fit in 8GB VRAM → CUDA error → must disable GPU
+  
+- **RAM:** 
+  - **Stores the entire LLM model** in CPU mode
+  - 14B model = ~9GB loaded into RAM
+  - Also holds context (your question + 15 chunks)
+  - **🎯 Impact:** 16GB is minimum for 14B, 32GB better for 32B
+  - **Insufficient RAM = model won't load at all**
+
+#### 📊 Component Impact Summary Table
+
+| Component | Ingestion Speed | Query Retrieval | Answer Speed | Answer Quality |
+|-----------|----------------|-----------------|--------------|----------------|
+| **CPU** | ⭐⭐⭐ Major | ⭐⭐⭐ Critical | ⭐⭐⭐ Critical (CPU mode) | ❌ No impact |
+| **GPU** | ⭐⭐ Helpful | ❌ Not used | ⭐⭐⭐ Critical (GPU mode) | ❌ No impact |
+| **RAM** | ⭐ Minor | ⭐ Minor | ⭐⭐⭐ Critical | ⭐⭐ Indirect* |
+| **Storage (SSD)** | ⭐ Minor | ⭐ Minor | ❌ No impact | ❌ No impact |
+
+**\*** More RAM → allows larger models → better quality answers
+
+#### 🎯 Why Your Current Setup Uses CPU-Only Mode
+
+**Your Hardware:** RTX 5050 8GB VRAM, 16GB RAM, 24 CPU cores
+
+**The Problem:**
+1. **Embeddings (mxbai-embed-large):** 669MB → ✅ Fits in 8GB GPU → Works great!
+2. **14B LLM Model:** Needs ~10GB VRAM → ❌ Only 8GB available → CUDA error!
+
+**Your Choice:** Use 14B on CPU (slow but best quality) instead of 7B on GPU (fast but lower quality)
+
+**Result:**
+- **During ingestion:** GPU helps with embeddings → faster (2-5 min)
+- **During queries:** LLM runs on CPU → slower (8-15 sec) but highest quality answers
+
 #### CPU vs GPU Performance
 
 **CPU-Only Systems (current setup):**
@@ -419,6 +518,12 @@ If ingestion fails with "context length exceeded", reduce CHUNK_SIZE.
 - 7B models: 6GB VRAM minimum (RTX 3060, RTX 4060)
 - 14B models: 10GB VRAM minimum (RTX 3080, RTX 4070)
 - 32B models: 24GB VRAM minimum (RTX 3090, RTX 4090)
+
+**⚠️ GPU Memory Insufficient?**
+If you have a GPU but get CUDA errors (e.g., RTX 5050 with 8GB trying to run 14B):
+- **Option 1:** Force CPU-only mode (see Troubleshooting section)
+- **Option 2:** Use smaller model (7B works on 8GB VRAM)
+- **Trade-off:** CPU is slower but works with any model size
 
 #### RAM Impact
 
@@ -558,18 +663,81 @@ RETRIEVAL_CHUNKS=20
 TOP_N_RERANK=5
 ```
 
+### CUDA Error / GPU Out of Memory
+
+**Error:** `llama runner process has terminated: CUDA error`
+
+**Cause:** Model too large for your GPU VRAM, or GPU memory is full from other processes.
+
+**GPU VRAM Requirements:**
+- 7B models: 6GB VRAM minimum
+- 14B models: 10GB VRAM minimum  
+- 32B models: 24GB VRAM minimum
+
+**Check your GPU:**
+```powershell
+nvidia-smi
+```
+
+**Solution 1: Force CPU-Only Mode (if insufficient VRAM)**
+
+Permanently enable CPU-only mode:
+```powershell
+[System.Environment]::SetEnvironmentVariable('OLLAMA_NUM_GPU', '0', 'User')
+$env:OLLAMA_NUM_GPU = '0'
+```
+
+Restart your terminal and frontend. Models will run on CPU (slower but works).
+
+**Solution 2: Use Smaller Model (if you want GPU speed)**
+
+Switch to 7B model if you have 8GB VRAM:
+```powershell
+ollama pull qwen2.5:7b-instruct
+```
+
+Update `.env`:
+```env
+OLLAMA_MODEL=qwen2.5:7b-instruct
+```
+
+**Solution 3: Free GPU Memory**
+
+Close other GPU-consuming applications (games, video editing, etc.) and restart Ollama:
+```powershell
+Get-Process ollama -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 3
+# Ollama will auto-restart
+```
+
+**To Re-Enable GPU Mode Later:**
+```powershell
+[System.Environment]::SetEnvironmentVariable('OLLAMA_NUM_GPU', '1', 'User')
+$env:OLLAMA_NUM_GPU = '1'
+```
+
 ---
 
 ## 📈 Performance Benchmarks
 
 Based on 458 documents (~30,000 chunks):
 
+**GPU Mode:**
+
 | Configuration | Ingestion Time | Query Time | Accuracy* |
 |---------------|----------------|------------|-----------|
-| nomic + 7B | 5 min | 3-5s | ⭐⭐⭐⭐ |
-| mxbai + 7B | 8 min | 3-5s | ⭐⭐⭐⭐⭐ |
-| mxbai + 14B | 8 min | 8-12s | ⭐⭐⭐⭐⭐ |
-| bge-large + 14B | 12 min | 8-12s | ⭐⭐⭐⭐⭐ |
+| nomic + 7B (GPU) | 2 min | 0.5-1s | ⭐⭐⭐⭐ |
+| mxbai + 7B (GPU) | 3 min | 0.5-1s | ⭐⭐⭐⭐⭐ |
+| mxbai + 14B (GPU) | 3 min | 1-2s | ⭐⭐⭐⭐⭐ |
+
+**CPU-Only Mode (OLLAMA_NUM_GPU=0):**
+
+| Configuration | Ingestion Time | Query Time | Accuracy* |
+|---------------|----------------|------------|-----------|
+| nomic + 7B (CPU) | 5 min | 3-5s | ⭐⭐⭐⭐ |
+| mxbai + 7B (CPU) | 8 min | 3-5s | ⭐⭐⭐⭐⭐ |
+| mxbai + 14B (CPU) | 8 min | 8-15s | ⭐⭐⭐⭐⭐ |
+| bge-large + 14B (CPU) | 12 min | 8-15s | ⭐⭐⭐⭐⭐ |
 
 *Accuracy for technical documentation queries
 
