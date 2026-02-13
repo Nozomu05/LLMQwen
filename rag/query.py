@@ -12,18 +12,6 @@ from langchain_core.prompts import ChatPromptTemplate
 import time
 
 try:
-    from langchain_mistralai import ChatMistralAI
-    MISTRAL_AVAILABLE = True
-except ImportError:
-    MISTRAL_AVAILABLE = False
-
-try:
-    from langchain_openai import ChatOpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
-
-try:
     from langchain_community.document_compressors.flashrank_rerank import FlashrankRerank
     RERANKING_AVAILABLE = True
 except ImportError:
@@ -34,40 +22,13 @@ def format_docs(docs: List[Document]) -> str:
     return "\n\n".join(f"[Source: {d.metadata.get('source', 'unknown')}]\n{d.page_content}" for d in docs)
 
 
-def get_llm(provider: str):
-    if provider == "ollama":
-        model_name = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
-        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        return ChatOllama(model=model_name, base_url=base_url), model_name
-    
-    elif provider == "mistral":
-        if not MISTRAL_AVAILABLE:
-            print("Error: Mistral support not available. Install with: pip install langchain-mistralai")
-            sys.exit(1)
-        api_key = os.getenv("MISTRAL_API_KEY")
-        if not api_key or api_key == "your_mistral_api_key_here":
-            print("Error: MISTRAL_API_KEY not set in .env file")
-            sys.exit(1)
-        model_name = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
-        return ChatMistralAI(model=model_name, api_key=api_key, temperature=0), model_name
-    
-    elif provider == "openai":
-        if not OPENAI_AVAILABLE:
-            print("Error: OpenAI support not available. Install with: pip install langchain-openai")
-            sys.exit(1)
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key or api_key == "your_openai_api_key_here":
-            print("Error: OPENAI_API_KEY not set in .env file")
-            sys.exit(1)
-        model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        return ChatOpenAI(model=model_name, api_key=api_key, temperature=0), model_name
-    
-    else:
-        print(f"Error: Unknown provider '{provider}'. Use: ollama, mistral, or openai")
-        sys.exit(1)
+def get_llm():
+    model_name = os.getenv("OLLAMA_MODEL", "qwen2.5:14b-instruct")
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    return ChatOllama(model=model_name, base_url=base_url), model_name
 
 
-def run_query_complete(question: str, provider: str = "ollama") -> tuple[str, str, List[str]]:
+def run_query_complete(question: str) -> tuple[str, str, List[str]]:
     load_dotenv()
     
     chroma_dir = Path(os.getenv("CHROMA_DIR", "storage/chroma")).resolve()
@@ -176,7 +137,7 @@ Follow this structure for maximum detail:
 Write your answer now (aim for 300-500+ words with extensive technical detail):""")
     ])
     
-    llm, model_name = get_llm(provider)
+    llm, model_name = get_llm()
     chain = prompt | llm
     context_text = format_docs(docs)
     result = chain.invoke({"question": question, "context": context_text})
@@ -190,9 +151,6 @@ def main() -> None:
     load_dotenv()
 
     chroma_dir = Path(os.getenv("CHROMA_DIR", "storage/chroma")).resolve()
-    provider = os.getenv("MODEL_PROVIDER", "ollama").lower()
-    
-    print(f"Using provider: {provider}")
 
     if not chroma_dir.exists():
         print(f"Vector store directory not found: {chroma_dir}")
@@ -313,7 +271,7 @@ Follow this structure for maximum detail:
 Write your answer now (aim for 300-500+ words with extensive technical detail):""")
     ])
 
-    llm, model_name = get_llm(provider)
+    llm, model_name = get_llm()
     chain = prompt | llm
 
     print(f"Querying model: {model_name}\n")
