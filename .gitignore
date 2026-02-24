@@ -42,6 +42,7 @@ Thumbs.db
 storage/chroma/
 docs/
 storage/.ingest_cache.json
+ingestion_errors.log
 
 # Office temporary files
 ~$*
