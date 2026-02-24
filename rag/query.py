@@ -6,6 +6,7 @@ from typing import List
 from dotenv import load_dotenv
 from langchain_ollama import ChatOllama  # type: ignore
 from langchain_community.embeddings import FastEmbedEmbeddings  # type: ignore
+from langchain_huggingface import HuggingFaceEmbeddings  # type: ignore
 from langchain_chroma import Chroma  # type: ignore
 from langchain_core.documents import Document  # type: ignore
 from langchain_core.prompts import ChatPromptTemplate  # type: ignore
@@ -37,10 +38,29 @@ def format_docs(docs: List[Document]) -> str:
     return "\n\n".join(f"[Source: {d.metadata.get('source', 'unknown')}]\n{d.page_content}" for d in docs)
 
 
+def get_embeddings():
+    """Get embeddings based on the configured provider."""
+    embedding_provider = os.getenv("EMBEDDING_PROVIDER", "fastembed").lower()
+    embedding_model = os.getenv("EMBEDDING_MODEL")
+    
+    if embedding_provider == "huggingface":
+        return HuggingFaceEmbeddings(
+            model_name=embedding_model,
+            model_kwargs={'device': 'cpu'},
+            encode_kwargs={'normalize_embeddings': True}
+        )
+    else: 
+        return FastEmbedEmbeddings(
+            model_name=embedding_model,
+            max_length=512
+        )
+
+
 def get_llm():
     model_name = os.getenv("OLLAMA_MODEL")
     base_url = os.getenv("OLLAMA_BASE_URL")
     return ChatOllama(model=model_name, base_url=base_url), model_name
+
 
 
 def run_query_complete(query: str, provider: str = "ollama") -> tuple[str, str, list[str]]:
@@ -55,11 +75,7 @@ def run_query_complete(query: str, provider: str = "ollama") -> tuple[str, str, 
     if not chroma_dir.exists():
         raise FileNotFoundError(f"Vector store directory not found: {chroma_dir}. Run ingestion first.")
     
-    embedding_model = os.getenv("EMBEDDING_MODEL")
-    embeddings = FastEmbedEmbeddings(
-        model_name=embedding_model,
-        max_length=512
-    )
+    embeddings = get_embeddings()
     
     vectorstore = Chroma(persist_directory=str(chroma_dir), embedding_function=embeddings)
     
@@ -75,9 +91,17 @@ def run_query_complete(query: str, provider: str = "ollama") -> tuple[str, str, 
         compressor = Reranker(model_name=reranker_model, top_n=top_n)
         docs = compressor.compress_documents(docs, query)
 
-    # Use the EXACT same prompt as the terminal version for consistent quality
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are an expert technical assistant that provides extremely detailed, comprehensive, and in-depth answers based on the given context.
+
+🌍 LANGUAGE REQUIREMENT - CRITICAL:
+- ALWAYS respond in the SAME LANGUAGE as the question
+- If the question is in French, respond in French
+- If the question is in English, respond in English
+- If the question is in Spanish, respond in Spanish
+- Apply this to ANY language the user asks in
+- Maintain the SAME level of technical detail and quality regardless of language
+- Technical terms can remain in English if there's no standard translation, but explain them in the question's language
 
 CRITICAL INSTRUCTIONS - YOUR ANSWERS MUST BE DETAILED AND THOROUGH:
 
@@ -182,11 +206,7 @@ def main() -> None:
     print(f"Loading Chroma from: {chroma_dir}")
     
     start_time = time.time()
-    embedding_model = os.getenv("EMBEDDING_MODEL")
-    embeddings = FastEmbedEmbeddings(
-        model_name=embedding_model,
-        max_length=512
-    )
+    embeddings = get_embeddings()
     
     vectorstore = Chroma(persist_directory=str(chroma_dir), embedding_function=embeddings)
     print(f"Loaded in {time.time() - start_time:.2f}s")
@@ -209,6 +229,15 @@ def main() -> None:
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are an expert technical assistant that provides extremely detailed, comprehensive, and in-depth answers based on the given context.
+
+🌍 LANGUAGE REQUIREMENT - CRITICAL:
+- ALWAYS respond in the SAME LANGUAGE as the question
+- If the question is in French, respond in French
+- If the question is in English, respond in English
+- If the question is in Spanish, respond in Spanish
+- Apply this to ANY language the user asks in
+- Maintain the SAME level of technical detail and quality regardless of language
+- Technical terms can remain in English if there's no standard translation, but explain them in the question's language
 
 CRITICAL INSTRUCTIONS - YOUR ANSWERS MUST BE DETAILED AND THOROUGH:
 

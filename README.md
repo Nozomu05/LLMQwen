@@ -25,6 +25,11 @@ A Retrieval-Augmented Generation (RAG) system that lets you query your documents
   - [Upgrading to Production Quality](#upgrading-to-production-quality)
   - [🏆 Recommended Production Configurations](#-recommended-production-configurations)
   - [⚡ Performance Impact Summary](#-performance-impact-summary)
+- [🌍 Multilingual Functionality Guide](#-multilingual-functionality-guide)
+  - [How Each Component Affects Multilingual Support](#how-each-component-affects-multilingual-support)
+  - [Current System Multilingual Capability](#current-system-multilingual-capability)
+  - [Upgrading to Full Multilingual Support](#upgrading-to-full-multilingual-support)
+  - [Testing Multilingual Functionality](#testing-multilingual-functionality)
 - [Chunking Configuration Guide](#chunking-configuration-guide)
   - [What is Chunking?](#what-is-chunking)
   - [Current Default Settings](#current-default-settings)
@@ -420,6 +425,140 @@ OLLAMA_MODEL=qwen2.5:14b-instruct
 | LLM Model | Response generation speed/quality | ❌ No |
 
 **Note:** Upgrading embedding model requires re-running `python rag/ingest.py` to rebuild the vector database with new embeddings.
+
+---
+
+## 🌍 Multilingual Functionality Guide
+
+The chatbot **automatically responds in the language you use** to ask questions (English, French, Spanish, etc.). However, **each model component affects multilingual quality differently**:
+
+### How Each Component Affects Multilingual Support
+
+#### **1. Embedding Model - CRITICAL for Multilingual Retrieval** 🔴
+
+**Impact:** Determines if your question in ANY language can find relevant documents
+
+**Current Model:** `sentence-transformers/all-MiniLM-L6-v2`
+- ⚠️ **English-only optimized**
+- Non-English queries will retrieve less relevant documents
+- Works for English, poor for French/Spanish/other languages
+
+**Recommended for Multilingual:**
+```env
+EMBEDDING_MODEL=BAAI/bge-m3
+# or
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+```
+
+**Why it matters:**
+- French question → English-focused embeddings → retrieves wrong documents → LLM gets irrelevant context → poor answer **even if LLM speaks French**
+- Multilingual embeddings → retrieves correct documents in any language → LLM gets relevant context → excellent answer
+
+**⚠️ Requires re-ingestion:** YES - `python rag/ingest.py`
+
+---
+
+#### **2. Reranker Model - Important for Multilingual Precision** 🟡
+
+**Impact:** Refines which documents are most relevant to your question
+
+**Current Model:** `BAAI/bge-reranker-base`
+- ⚠️ **English-focused**
+- Can rerank, but less accurate for non-English queries
+
+**Recommended for Multilingual:**
+```env
+RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+```
+
+**Why it matters:**
+- Even if embeddings retrieve 10 good multilingual documents, English-only reranker might rank them poorly
+- Multilingual reranker correctly identifies the most relevant chunks in any language
+
+**⚠️ Requires re-ingestion:** NO - just update `.env` and restart
+
+---
+
+#### **3. LLM (Text Generation Model) - Determines Answer Language** 🟢
+
+**Impact:** Generates the actual response in the target language
+
+**Current Model:** `qwen2.5:14b-instruct`
+- ✅ **Excellent multilingual support** (100+ languages)
+- Strong in: English, Chinese, French, Spanish, German, Japanese, Korean, Arabic, and more
+- The prompt automatically instructs it to respond in the question's language
+
+**Alternative Multilingual LLMs:**
+```bash
+ollama pull qwen2.5:32b-instruct    # Best multilingual quality
+ollama pull llama3.1:8b             # Good for European languages
+ollama pull mistral:7b-instruct     # Good for French/English
+```
+
+**Why it matters:**
+- Even with perfect retrieval, if LLM doesn't support the language, answers will be poor or in wrong language
+- Qwen models are already excellent for multilingual - upgrading mainly improves reasoning depth
+
+**⚠️ Requires re-ingestion:** NO - just update `.env` and restart
+
+---
+
+### Current System Multilingual Capability
+
+| Component | Current Model | Multilingual? | Impact on Non-English |
+|-----------|---------------|---------------|------------------------|
+| **Embedding** | all-MiniLM-L6-v2 | ❌ English-only | 🔴 **Poor retrieval** for non-English questions |
+| **Reranker** | bge-reranker-base | ⚠️ English-focused | 🟡 **Suboptimal ranking** for non-English |
+| **LLM** | qwen2.5:14b-instruct | ✅ Excellent | ✅ **Perfect responses** in any language |
+
+**Result:** The LLM **CAN respond** in French/Spanish/etc., but will work with **lower-quality context** retrieved by English-only embeddings.
+
+---
+
+### Upgrading to Full Multilingual Support
+
+**Recommended Configuration:**
+
+```env
+# In .env file
+EMBEDDING_MODEL=BAAI/bge-m3
+RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+OLLAMA_MODEL=qwen2.5:14b-instruct
+```
+
+**Steps:**
+1. Update `.env` with multilingual models
+2. Re-ingest documents: `python rag/ingest.py` (required for embedding change)
+3. Restart frontend/queries
+
+**Benefits:**
+- ✅ Excellent retrieval for questions in **any language**
+- ✅ Accurate reranking regardless of language
+- ✅ High-quality answers in **100+ languages**
+
+**Trade-offs:**
+- Slightly slower (BGE-m3 is ~2x slower than all-MiniLM-L6-v2)
+- Larger model downloads (~3GB vs 90MB)
+
+---
+
+### Testing Multilingual Functionality
+
+```powershell
+# English
+python rag/query.py "What are the latest V-PCC compression results?"
+
+# French
+python rag/query.py "Quels sont les derniers résultats de compression V-PCC ?"
+
+# Spanish
+python rag/query.py "¿Cuáles son los últimos resultados de compresión V-PCC?"
+```
+
+**Expected behavior:**
+- ✅ LLM responds in the correct language (works with current setup)
+- ⚠️ Answer quality may be lower for non-English with current English-only embeddings
+- ✅ Full quality in all languages after upgrading to multilingual embeddings
 
 ---
 

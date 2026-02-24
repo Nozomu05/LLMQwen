@@ -21,6 +21,7 @@ from langchain_community.document_loaders import (  # type: ignore
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore
 from langchain_community.embeddings import FastEmbedEmbeddings  # type: ignore
+from langchain_huggingface import HuggingFaceEmbeddings  # type: ignore
 from langchain_chroma import Chroma  # type: ignore
 from langchain_core.documents import Document  # type: ignore
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -331,14 +332,27 @@ def main() -> None:
     chunks = splitter.split_documents(all_docs)
     print(f"  Created {len(chunks)} chunks in {time.time() - start_split:.2f}s")
 
+    embedding_provider = os.getenv("EMBEDDING_PROVIDER", "fastembed").lower()
     embedding_model = os.getenv("EMBEDDING_MODEL")
-    print(f"\nUsing FastEmbed embeddings: {embedding_model}")
     
-    embeddings = FastEmbedEmbeddings(
-        model_name=embedding_model, 
-        max_length=512,
-        threads=4
-    )
+    print(f"\nSetting up embeddings...")
+    print(f"  Provider: {embedding_provider}")
+    print(f"  Model: {embedding_model}")
+    
+    if embedding_provider == "huggingface":
+        print("  Using HuggingFace embeddings (supports any model)")
+        embeddings = HuggingFaceEmbeddings(
+            model_name=embedding_model,
+            model_kwargs={'device': 'cpu'},  
+            encode_kwargs={'normalize_embeddings': True}
+        )
+    else:  
+        print("  Using FastEmbed embeddings (optimized, limited models)")
+        embeddings = FastEmbedEmbeddings(
+            model_name=embedding_model, 
+            max_length=512,
+            threads=4
+        )
 
     chroma_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nBuilding Chroma index at: {chroma_dir}")
