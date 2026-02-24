@@ -4,11 +4,11 @@ from pathlib import Path
 from typing import List
 
 from dotenv import load_dotenv
-from langchain_ollama import ChatOllama
-from langchain_community.embeddings import FastEmbedEmbeddings
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_ollama import ChatOllama  # type: ignore
+from langchain_community.embeddings import FastEmbedEmbeddings  # type: ignore
+from langchain_chroma import Chroma  # type: ignore
+from langchain_core.documents import Document  # type: ignore
+from langchain_core.prompts import ChatPromptTemplate  # type: ignore
 from sentence_transformers import CrossEncoder
 import time
 

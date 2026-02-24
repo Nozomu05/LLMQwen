@@ -8,7 +8,7 @@ from typing import List
 import re
 import xml.etree.ElementTree as ET
 
-from langchain_community.document_loaders import (
+from langchain_community.document_loaders import (  # type: ignore
     DirectoryLoader, 
     TextLoader, 
     UnstructuredPowerPointLoader, 
@@ -19,22 +19,22 @@ from langchain_community.document_loaders import (
     UnstructuredMarkdownLoader,
     UnstructuredWordDocumentLoader
 )
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import FastEmbedEmbeddings
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore
+from langchain_community.embeddings import FastEmbedEmbeddings  # type: ignore
+from langchain_chroma import Chroma  # type: ignore
+from langchain_core.documents import Document  # type: ignore
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from datetime import datetime
 
 try:
-    from docx import Document as DocxDocument
+    from docx import Document as DocxDocument  # type: ignore
     PYTHON_DOCX_AVAILABLE = True
 except ImportError:
     PYTHON_DOCX_AVAILABLE = False
 
 try:
-    from docx import Document as DocxDocument
+    from docx import Document as DocxDocument  # type: ignore
     PYTHON_DOCX_AVAILABLE = True
 except ImportError:
     PYTHON_DOCX_AVAILABLE = False
