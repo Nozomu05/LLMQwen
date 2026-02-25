@@ -8,7 +8,7 @@ from typing import List
 import re
 import xml.etree.ElementTree as ET
 
-from langchain_community.document_loaders import (  # type: ignore
+from langchain_community.document_loaders import (
     DirectoryLoader, 
     TextLoader, 
     UnstructuredPowerPointLoader, 
@@ -19,27 +19,26 @@ from langchain_community.document_loaders import (  # type: ignore
     UnstructuredMarkdownLoader,
     UnstructuredWordDocumentLoader
 )
-from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore
-from langchain_community.embeddings import FastEmbedEmbeddings  # type: ignore
-from langchain_huggingface import HuggingFaceEmbeddings  # type: ignore
-from langchain_chroma import Chroma  # type: ignore
-from langchain_core.documents import Document  # type: ignore
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import FastEmbedEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from datetime import datetime
 
 try:
-    from docx import Document as DocxDocument  # type: ignore
+    from docx import Document as DocxDocument
     PYTHON_DOCX_AVAILABLE = True
 except ImportError:
     PYTHON_DOCX_AVAILABLE = False
 
 try:
-    from docx import Document as DocxDocument  # type: ignore
+    from docx import Document as DocxDocument
     PYTHON_DOCX_AVAILABLE = True
 except ImportError:
     PYTHON_DOCX_AVAILABLE = False
-
 
 def load_docx_with_python_docx(file_path: str) -> List[Document]:
     if not PYTHON_DOCX_AVAILABLE:
@@ -49,7 +48,6 @@ def load_docx_with_python_docx(file_path: str) -> List[Document]:
     if not text.strip():
         raise ValueError("No text extracted")
     return [Document(page_content=text, metadata={"source": Path(file_path).name})]
-
 
 def load_docx_raw_xml(file_path: str) -> List[Document]:
     with zipfile.ZipFile(file_path, 'r') as docx_zip:
@@ -67,7 +65,6 @@ def load_docx_raw_xml(file_path: str) -> List[Document]:
             return [Document(page_content=text, metadata={"source": Path(file_path).name})]
         except Exception as e:
             raise ValueError(f"Failed to extract from XML: {e}")
-
 
 def extract_zip_files(docs_dir: Path) -> None:
     zip_files = list(docs_dir.glob("**/*.zip"))
@@ -128,7 +125,6 @@ def extract_zip_files(docs_dir: Path) -> None:
         extract_recursive(zip_path)
     
     print()
-
 
 def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> tuple[List[Document], dict]:
     all_docs = []
@@ -265,7 +261,6 @@ def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> tuple[List[Doc
     
     return all_docs, stats
 
-
 def main() -> None:
     load_dotenv()
 
@@ -334,16 +329,18 @@ def main() -> None:
 
     embedding_provider = os.getenv("EMBEDDING_PROVIDER", "fastembed").lower()
     embedding_model = os.getenv("EMBEDDING_MODEL")
+    embedding_device = os.getenv("EMBEDDING_DEVICE", "cuda").lower()
     
     print(f"\nSetting up embeddings...")
     print(f"  Provider: {embedding_provider}")
     print(f"  Model: {embedding_model}")
+    print(f"  Device: {embedding_device}")
     
     if embedding_provider == "huggingface":
         print("  Using HuggingFace embeddings (supports any model)")
         embeddings = HuggingFaceEmbeddings(
             model_name=embedding_model,
-            model_kwargs={'device': 'cpu'},  
+            model_kwargs={'device': embedding_device},  
             encode_kwargs={'normalize_embeddings': True}
         )
     else:  
@@ -405,7 +402,6 @@ def main() -> None:
         print(f"\n🎉 All files successfully ingested!")
     
     print(f"\n✅ Vector store is ready for querying")
-
 
 if __name__ == "__main__":
     main()

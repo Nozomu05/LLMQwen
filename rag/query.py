@@ -4,7 +4,10 @@ from pathlib import Path
 from typing import List
 
 from dotenv import load_dotenv
-from langchain_ollama import ChatOllama  # type: ignore
+try:
+    from .transformers_llm import TransformersLLM  # type: ignore
+except Exception:
+    from transformers_llm import TransformersLLM  # type: ignore
 from langchain_community.embeddings import FastEmbedEmbeddings  # type: ignore
 from langchain_huggingface import HuggingFaceEmbeddings  # type: ignore
 from langchain_chroma import Chroma  # type: ignore
@@ -12,6 +15,17 @@ from langchain_core.documents import Document  # type: ignore
 from langchain_core.prompts import ChatPromptTemplate  # type: ignore
 from sentence_transformers import CrossEncoder
 import time
+import hashlib
+import random
+
+try:
+    import numpy as _np
+except Exception:
+    _np = None
+try:
+    import torch as _torch
+except Exception:
+    _torch = None
 
 
 class Reranker:
@@ -57,9 +71,41 @@ def get_embeddings():
 
 
 def get_llm():
-    model_name = os.getenv("OLLAMA_MODEL")
-    base_url = os.getenv("OLLAMA_BASE_URL")
-    return ChatOllama(model=model_name, base_url=base_url), model_name
+
+    load_dotenv()
+
+    model_name = os.getenv("TRANSFORMERS_MODEL")
+    quantization = os.getenv("QUANTIZATION", "none")
+    device = os.getenv("LLM_DEVICE", "auto")
+    seed = int(os.getenv("LLM_SEED", "0"))
+
+    if seed and seed > 0:
+        random.seed(seed)
+        if _np is not None:
+            _np.random.seed(seed)
+        if _torch is not None:
+            try:
+                _torch.manual_seed(seed)
+                _torch.cuda.manual_seed_all(seed)
+                _torch.use_deterministic_algorithms(True)
+            except Exception:
+                pass
+
+    global _LLM_CACHE
+    try:
+        _LLM_CACHE
+    except NameError:
+        _LLM_CACHE = {}
+
+    cache_key = (model_name, quantization, device)
+    if cache_key in _LLM_CACHE:
+        return _LLM_CACHE[cache_key], _LLM_CACHE[cache_key].model_name
+
+
+    llm = TransformersLLM()
+
+    _LLM_CACHE[cache_key] = llm
+    return llm, llm.model_name
 
 
 
@@ -176,15 +222,24 @@ Write your answer now (aim for 300-500+ words with extensive technical detail):"
 
     llm, model_name = get_llm()
     chain = prompt | llm
-    
+
     context_text = format_docs(docs)
+    temp = os.getenv("TEMPERATURE", str(getattr(llm, "temperature", "unknown")))
+    seed = os.getenv("LLM_SEED", "0")
+    sources = [d.metadata.get("source", "unknown") for d in docs]
+    prompt_payload = f"question:{query}\ncontext:{context_text}"
+    prompt_hash = hashlib.sha256(prompt_payload.encode("utf-8")).hexdigest()
 
     answer = ""
     for chunk in chain.stream({"question": query, "context": context_text}):
-        answer += chunk.content
+        if hasattr(chunk, "content"):
+            answer += chunk.content
+        elif hasattr(chunk, "text"):
+            answer += chunk.text
+        else:
+            answer += str(chunk)
 
-    sources = [d.metadata.get('source', 'unknown') for d in docs]
-    
+    sources = [d.metadata.get("source", "unknown") for d in docs]
     return answer, model_name, sources
 
 
@@ -312,16 +367,26 @@ Write your answer now (aim for 300-500+ words with extensive technical detail):"
 
     llm, model_name = get_llm()
     chain = prompt | llm
+    context_text = format_docs(docs)
+    temp = os.getenv("TEMPERATURE", str(getattr(llm, "temperature", "unknown")))
+    seed = os.getenv("LLM_SEED", "0")
+    sources = [d.metadata.get("source", "unknown") for d in docs]
+    prompt_payload = f"question:{query}\ncontext:{context_text}"
+    prompt_hash = hashlib.sha256(prompt_payload.encode("utf-8")).hexdigest()
 
     print(f"Querying model: {model_name}\n")
-    context_text = format_docs(docs)
     
     print("=== Answer ===\n")
     query_start = time.time()
     
     try:
         for chunk in chain.stream({"question": query, "context": context_text}):
-            print(chunk.content, end="", flush=True)
+            if hasattr(chunk, "content"):
+                print(chunk.content, end="", flush=True)
+            elif hasattr(chunk, "text"):
+                print(chunk.text, end="", flush=True)
+            else:
+                print(str(chunk), end="", flush=True)
         print(f"\n\n[Query completed in {time.time() - query_start:.2f}s]")
     except Exception as e:
         msg = str(e).lower()

@@ -64,8 +64,7 @@ class Handler(BaseHTTPRequestHandler):
             if not question:
                 self._send(400, json.dumps({"error": "Question is required"}))
                 return
-            provider = os.getenv("MODEL_PROVIDER", "ollama").lower()
-            answer, model_name, sources = run_query_complete(question, provider)
+            answer, model_name, sources = run_query_complete(question)
             self._send(200, json.dumps({"answer": answer, "model": model_name, "sources": sources}))
         except Exception as exc:
             import traceback

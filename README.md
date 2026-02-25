@@ -1,22 +1,22 @@
 # RAG System with Qwen
 
-A Retrieval-Augmented Generation (RAG) system that lets you query your documents using Ollama and Qwen models locally.
+A Retrieval-Augmented Generation (RAG) system that lets you query your documents using Qwen models from HuggingFace Transformers locally.
 
 ---
 
 ## Table of Contents
 
 - [Installation and Setup](#installation-and-setup)
-  - [Step 1: Install Ollama](#step-1-install-ollama)
-  - [Step 2: Pull Required Ollama Models](#step-2-pull-required-ollama-models)
-  - [Step 3: Enable CPU-Only Mode (For Low-End Computers)](#step-3-enable-cpu-only-mode-for-low-end-computers)
-  - [Step 4: Install Pandoc (Optional)](#step-4-install-pandoc-optional)
-  - [Step 5: Setup Python Environment](#step-5-setup-python-environment)
-  - [Step 6: Configure Environment](#step-6-configure-environment)
-  - [Step 7: Add Your Documents](#step-7-add-your-documents)
-  - [Step 8: Ingest Documents](#step-8-ingest-documents)
-  - [Step 9: Start the Frontend](#step-9-start-the-frontend)
+  - [Linux Prerequisites](#linux-prerequisites)
+  - [Step 1: Setup Python Environment](#step-1-setup-python-environment)
+  - [Step 2: Install Pandoc (Optional)](#step-2-install-pandoc-optional)
+  - [Step 3: Configure Environment](#step-3-configure-environment)
+  - [Step 4: Add Your Documents](#step-4-add-your-documents)
+  - [Step 5: Ingest Documents](#step-5-ingest-documents)
+  - [Step 6: Start the Frontend](#step-6-start-the-frontend)
 - [Command-Line Query (Optional)](#command-line-query-optional)
+  - [Interactive Mode (Recommended)](#interactive-mode-recommended)
+  - [Single Query Mode](#single-query-mode)
 - [Performance Notes](#performance-notes)
   - [CPU vs GPU Mode](#cpu-vs-gpu-mode)
   - [Model Recommendations by Hardware](#model-recommendations-by-hardware)
@@ -43,100 +43,46 @@ A Retrieval-Augmented Generation (RAG) system that lets you query your documents
 
 ## Installation and Setup
 
-### Step 1: Install Ollama
+### Linux Prerequisites
 
-**Windows (via Winget):**
-```powershell
-winget install Ollama.Ollama -e
-```
-
-Verify installation:
-```powershell
-ollama --version
-```
-
-Ollama runs as a Windows service automatically. If not running:
-```powershell
-ollama serve
-```
-
-**macOS (via Homebrew):**
+**For Ubuntu/Debian-based distributions:**
 ```bash
-brew install ollama
+# Update package list
+sudo apt update
+
+# Install Python 3.10+ and pip
+sudo apt install python3 python3-pip python3-venv
+
+# Install development tools (required for some Python packages)
+sudo apt install build-essential python3-dev
 ```
 
-Verify installation:
+**For Fedora/RHEL/CentOS:**
 ```bash
-ollama --version
+# Install Python 3.10+ and pip
+sudo dnf install python3 python3-pip
+
+# Install development tools
+sudo dnf groupinstall "Development Tools"
+sudo dnf install python3-devel
 ```
 
-Start Ollama service:
+**For Arch Linux:**
 ```bash
-ollama serve
+# Install Python and pip
+sudo pacman -S python python-pip
+
+# Install base development tools
+sudo pacman -S base-devel
 ```
 
-**macOS (Manual Download):**
-Download from [https://ollama.ai/download](https://ollama.ai/download) and install the .dmg file.
-
-### Step 2: Pull Required Ollama Models
-
-**LLM Model (for answering queries):**
+**Verify Python installation:**
 ```bash
-ollama pull qwen2.5:14b-instruct
+python3 --version  # Should be 3.10 or higher
+pip3 --version
 ```
 
-**Embedding Model (for semantic search):**
-```bash
-ollama pull mxbai-embed-large
-```
-
-**Note for low-end computers:** The 14b model requires ~16GB RAM. If you have less RAM, use:
-```bash
-ollama pull qwen2.5:7b-instruct  # Requires ~8GB RAM
-```
-
-### Step 3: Enable CPU-Only Mode (For Low-End Computers)
-
-**If you have a low-end computer or insufficient GPU memory**, force Ollama to run on CPU only:
-
-**Windows:**
-```powershell
-[System.Environment]::SetEnvironmentVariable('OLLAMA_NUM_GPU', '0', 'User')
-$env:OLLAMA_NUM_GPU = '0'
-```
-
-**macOS/Linux:**
-```bash
-echo 'export OLLAMA_NUM_GPU=0' >> ~/.bashrc  # or ~/.zshrc for zsh
-source ~/.bashrc  # or source ~/.zshrc
-```
-
-Restart your terminal after setting this. The model will run slower but work on any computer.
-
-**To re-enable GPU later (if you upgrade hardware):**
-```powershell
-# Windows
-[System.Environment]::SetEnvironmentVariable('OLLAMA_NUM_GPU', '1', 'User')
-```
-```bash
-# macOS/Linux - remove the line from ~/.bashrc or ~/.zshrc
-```
-
-### Step 4: Install Pandoc (Optional)
-
-Only needed if you have OpenDocument (.odt) files:
-
-**Windows:**
-```powershell
-winget install --id JohnMacFarlane.Pandoc -e
-```
-
-**macOS:**
-```bash
-brew install pandoc
-```
-
-### Step 5: Setup Python Environment
+### Step 1: Setup Python Environment
 
 **Windows:**
 ```powershell
@@ -160,7 +106,36 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Step 6: Configure Environment
+**Note:** The first time you run a query, the Qwen model (~28GB for 14B model) will download automatically to `~/.cache/huggingface/`. This may take some time depending on your internet connection.
+
+### Step 2: Install Pandoc (Optional)
+
+Only needed if you have OpenDocument (.odt) files:
+
+**Windows:**
+```powershell
+winget install --id JohnMacFarlane.Pandoc -e
+```
+
+**macOS:**
+```bash
+brew install pandoc
+```
+
+**Linux:**
+```bash
+# Ubuntu/Debian
+sudo apt update
+sudo apt install pandoc
+
+# Fedora/RHEL/CentOS
+sudo dnf install pandoc
+
+# Arch Linux
+sudo pacman -S pandoc
+```
+
+### Step 3: Configure Environment
 
 **Windows:**
 ```powershell
@@ -175,27 +150,39 @@ cp .env.example .env
 Edit `.env` with your settings:
 ```env
 # Model Configuration
-OLLAMA_MODEL=qwen2.5:14b-instruct
-OLLAMA_BASE_URL=http://localhost:11434
-EMBEDDING_MODEL=mxbai-embed-large
+LLM_PROVIDER=transformers
+TRANSFORMERS_MODEL=Qwen/Qwen2.5-14B-Instruct
+MAX_NEW_TOKENS=4096
+TEMPERATURE=0
+LLM_SEED=42
+QUANTIZATION=4bit
+
+# Device Configuration (auto, cuda, or cpu)
+LLM_DEVICE=auto
+EMBEDDING_DEVICE=cuda
+RERANKER_DEVICE=cuda
+
+# Embedding Configuration
+EMBEDDING_PROVIDER=huggingface
+EMBEDDING_MODEL=intfloat/multilingual-e5-large-instruct
 
 # Retrieval Settings
 RETRIEVAL_CHUNKS=100
-TOP_N_RERANK=15
+TOP_N_RERANK=8
 USE_RERANKING=true
 
 # Document Processing
 CHUNK_SIZE=800
-CHUNK_OVERLAP=160
+CHUNK_OVERLAP=100
 ```
 
-**Note:** If using 7b model on low-end computer, change to `OLLAMA_MODEL=qwen2.5:7b-instruct`
+**Note:** If using a lower-spec computer, change to `TRANSFORMERS_MODEL=Qwen/Qwen2.5-7B-Instruct` for faster performance. If you don't have a GPU, set all device settings to `cpu`.
 
-### Step 7: Add Your Documents
+### Step 4: Add Your Documents
 
 Place your documents (Word, PDF, PowerPoint, Text, Markdown, etc.) in the `docs/` folder.
 
-### Step 8: Ingest Documents
+### Step 5: Ingest Documents
 
 Run the ingestion script to process your documents:
 
@@ -215,7 +202,7 @@ This will:
 - Generate embeddings
 - Store vectors in the database
 
-### Step 9: Start the Frontend
+### Step 6: Start the Frontend
 
 Start the web interface:
 
@@ -237,25 +224,99 @@ Open this URL in your browser to start querying your documents!
 
 ## Command-Line Query (Optional)
 
-You can also run queries directly from the command line:
+### Interactive Mode (Recommended)
+
+For multiple queries without reloading the model each time:
+
+**macOS/Linux:**
+```bash
+python rag/query_interactive.py
+```
 
 **Windows:**
 ```powershell
-python rag\query.py "Your question here"
+python rag\query_interactive.py
 ```
+
+This loads the model **once** and keeps it in memory. You can then ask multiple questions without the 15-second checkpoint loading delay.
+
+**Example session:**
+```
+Query: What is V-PCC?
+[Answer streams in real-time...]
+
+Query: How does it compare to G-PCC?
+[Answer streams immediately - no reload!]
+
+Query: quit
+```
+
+### Single Query Mode
+
+For one-off queries from the command line:
 
 **macOS/Linux:**
 ```bash
 python rag/query.py "Your question here"
 ```
 
+**Windows:**
+```powershell
+python rag\query.py "Your question here"
+```
+
+**Note:** This reloads the model each time (~15s startup)
+
 ---
 
 ## Performance Notes
 
 ### CPU vs GPU Mode
-- **GPU Mode (default):** Fast responses (1-2 seconds with 14b model)
-- **CPU-Only Mode:** Slower responses (8-15 seconds with 14b model) but works on any computer
+
+The system can run on either CPU or GPU for optimal performance. You can configure which device each component uses in your `.env` file:
+
+```env
+# Device configuration
+# Options: auto (auto-detect GPU), cuda (force GPU), cpu (force CPU)
+LLM_DEVICE=auto              # Qwen language model
+EMBEDDING_DEVICE=cuda        # Document/query embeddings
+RERANKER_DEVICE=cuda         # Re-ranking model
+```
+
+**Device Options:**
+- `auto` - Automatically detects and uses GPU if available (recommended for LLM)
+- `cuda` - Forces GPU usage (fastest, requires NVIDIA GPU with CUDA)
+- `cpu` - Forces CPU usage (slower but works on any computer)
+
+**Performance Comparison (14B model):**
+- **GPU Mode (cuda):** Fast responses (1-2 seconds)
+- **CPU-Only Mode (cpu):** Slower responses (8-15 seconds) but works on any computer
+- **Auto Mode (auto):** Best of both worlds - uses GPU if available, falls back to CPU
+
+**Recommended Configurations:**
+
+*For systems with NVIDIA GPU:*
+```env
+LLM_DEVICE=auto              # Use GPU if available
+EMBEDDING_DEVICE=cuda        # Embeddings are 10-50x faster on GPU
+RERANKER_DEVICE=cuda         # Re-ranking is faster on GPU
+```
+
+*For CPU-only systems (no GPU):*
+```env
+LLM_DEVICE=cpu
+EMBEDDING_DEVICE=cpu
+RERANKER_DEVICE=cpu
+```
+
+*For systems with limited GPU memory:*
+```env
+LLM_DEVICE=cpu               # Save GPU memory
+EMBEDDING_DEVICE=cuda        # Embeddings use less memory
+RERANKER_DEVICE=cpu          # Only when needed
+```
+
+**Note:** After changing device settings, restart the application for changes to take effect. Re-ingestion is not required unless you change `EMBEDDING_DEVICE` after already ingesting documents.
 
 ### Model Recommendations by Hardware
 
@@ -349,26 +410,23 @@ No re-ingestion needed, changes apply immediately!
 - Use case: Complex reasoning, technical documents
 - Requirements: 32GB+ RAM recommended
 
-**Option 2 - Maximum Quality:** `qwen2.5:72b-instruct` (72B params, 48GB VRAM/64GB RAM)
+**Option 2 - Maximum Quality:** `Qwen/Qwen2.5-72B-Instruct` (72B params, 48GB VRAM/64GB RAM)
 - Speed: ⚡⚡ Slow (5x slower)
 - Quality: ⭐⭐⭐⭐⭐ Best available
 - Use case: Research, critical analysis, highest accuracy
 - Requirements: 64GB+ RAM, powerful hardware
 
-**Option 3 - Faster Lightweight:** `qwen2.5:7b-instruct` (7B params, 4GB VRAM/8GB RAM)
+**Option 3 - Faster Lightweight:** `Qwen/Qwen2.5-7B-Instruct` (7B params, 4GB VRAM/8GB RAM)
 - Speed: ⚡⚡⚡⚡⚡ Very Fast (2x faster)
 - Quality: ⭐⭐⭐ Good
 - Use case: Low-end hardware, quick responses
 
 **To upgrade LLM:**
-```bash
-# Pull new model
-ollama pull qwen2.5:32b-instruct
-
+```env
 # Update .env
-OLLAMA_MODEL=qwen2.5:32b-instruct
+TRANSFORMERS_MODEL=Qwen/Qwen2.5-32B-Instruct
 ```
-No re-ingestion needed!
+The new model will download automatically on first use. No re-ingestion needed!
 
 ### 🏆 **Recommended Production Configurations**
 
@@ -376,7 +434,7 @@ No re-ingestion needed!
 ```env
 EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
 RERANKER_MODEL=BAAI/bge-reranker-base
-OLLAMA_MODEL=qwen2.5:14b-instruct
+TRANSFORMERS_MODEL=Qwen/Qwen2.5-14B-Instruct
 ```
 - **Speed:** Fast
 - **Quality:** Very Good
@@ -387,7 +445,7 @@ OLLAMA_MODEL=qwen2.5:14b-instruct
 ```env
 EMBEDDING_MODEL=BAAI/bge-large-en-v1.5
 RERANKER_MODEL=BAAI/bge-reranker-v2-m3
-OLLAMA_MODEL=qwen2.5:32b-instruct
+TRANSFORMERS_MODEL=Qwen/Qwen2.5-32B-Instruct
 ```
 - **Speed:** Moderate
 - **Quality:** Excellent
@@ -398,7 +456,7 @@ OLLAMA_MODEL=qwen2.5:32b-instruct
 ```env
 EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 RERANKER_MODEL=BAAI/bge-reranker-base
-OLLAMA_MODEL=qwen2.5:14b-instruct
+TRANSFORMERS_MODEL=Qwen/Qwen2.5-14B-Instruct
 ```
 - **Speed:** Very Fast
 - **Quality:** Good
@@ -409,7 +467,7 @@ OLLAMA_MODEL=qwen2.5:14b-instruct
 ```env
 EMBEDDING_MODEL=BAAI/bge-m3
 RERANKER_MODEL=BAAI/bge-reranker-v2-m3
-OLLAMA_MODEL=qwen2.5:14b-instruct
+TRANSFORMERS_MODEL=Qwen/Qwen2.5-14B-Instruct
 ```
 - **Speed:** Moderate
 - **Quality:** Excellent
@@ -489,17 +547,17 @@ RERANKER_MODEL=BAAI/bge-reranker-v2-m3
 - The prompt automatically instructs it to respond in the question's language
 
 **Alternative Multilingual LLMs:**
-```bash
-ollama pull qwen2.5:32b-instruct    # Best multilingual quality
-ollama pull llama3.1:8b             # Good for European languages
-ollama pull mistral:7b-instruct     # Good for French/English
+```env
+# In .env file
+TRANSFORMERS_MODEL=Qwen/Qwen2.5-14B-Instruct    # Excellent for 100+ languages
+TRANSFORMERS_MODEL=Qwen/Qwen2.5-32B-Instruct    # Best multilingual quality
+# Other alternatives:
+# TRANSFORMERS_MODEL=meta-llama/Llama-3.1-8B-Instruct  # Good for European languages
 ```
 
 **Why it matters:**
 - Even with perfect retrieval, if LLM doesn't support the language, answers will be poor or in wrong language
 - Qwen models are already excellent for multilingual - upgrading mainly improves reasoning depth
-
-**⚠️ Requires re-ingestion:** NO - just update `.env` and restart
 
 ---
 
@@ -509,7 +567,7 @@ ollama pull mistral:7b-instruct     # Good for French/English
 |-----------|---------------|---------------|------------------------|
 | **Embedding** | all-MiniLM-L6-v2 | ❌ English-only | 🔴 **Poor retrieval** for non-English questions |
 | **Reranker** | bge-reranker-base | ⚠️ English-focused | 🟡 **Suboptimal ranking** for non-English |
-| **LLM** | qwen2.5:14b-instruct | ✅ Excellent | ✅ **Perfect responses** in any language |
+| **LLM** | Qwen2.5-14B-Instruct | ✅ Excellent | ✅ **Perfect responses** in any language |
 
 **Result:** The LLM **CAN respond** in French/Spanish/etc., but will work with **lower-quality context** retrieved by English-only embeddings.
 
@@ -523,7 +581,7 @@ ollama pull mistral:7b-instruct     # Good for French/English
 # In .env file
 EMBEDDING_MODEL=BAAI/bge-m3
 RERANKER_MODEL=BAAI/bge-reranker-v2-m3
-OLLAMA_MODEL=qwen2.5:14b-instruct
+TRANSFORMERS_MODEL=Qwen/Qwen2.5-14B-Instruct
 ```
 
 **Steps:**
@@ -662,3 +720,5 @@ CHUNK_OVERLAP=150
 | 1500/300 | ~15,000 | Slower | Most Complete |
 
 **Rule of Thumb:** Overlap should be 10-20% of chunk size for optimal results.
+
+---

@@ -1,6 +1,7 @@
 # Python
 .venv/
 venv/
+QWEN/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -39,13 +40,18 @@ wheels/
 Thumbs.db
 
 # Project specific
-storage/chroma/
-docs/
+ 
 storage/.ingest_cache.json
 ingestion_errors.log
 
 # Office temporary files
 ~$*
+# Ignore everything inside docs/ but not the folder itself
+docs/*
+!docs/
+# Ignore everything inside storage/ but not the folder itself
+storage/*
+!storage/
 *.tmp
 
 
