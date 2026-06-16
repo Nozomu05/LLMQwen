@@ -5,7 +5,10 @@ body { margin: 0; font-family: Inter, system-ui, -apple-system, Segoe UI, sans-s
 .card { background: rgba(255, 255, 255, 0.92); border: 1px solid rgba(150, 160, 190, 0.25); border-radius: 22px; box-shadow: 0 20px 60px rgba(26, 32, 44, 0.12); padding: 28px; backdrop-filter: blur(6px); }
 .title { font-size: 28px; font-weight: 700; margin: 0 0 6px; }
 .subtitle { color: #5d677f; margin: 0 0 18px; }
-.status { margin: 12px 0 16px; color: #6b7280; font-size: 14px; }
+.status { margin: 12px 0 16px; color: #6b7280; font-size: 14px; transition: color 0.2s; }
+.status-busy  { color: #2563eb; }
+.status-queue { color: #d97706; font-weight: 600; }
+.status-error { color: #dc2626; }
 .chat { background: #f5f6fb; border: 1px solid rgba(148, 163, 184, 0.4); border-radius: 16px; padding: 18px; height: 500px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
 .message { max-width: 85%; padding: 12px 14px; border-radius: 14px; line-height: 1.6; word-wrap: break-word; overflow-wrap: break-word; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08); }
 .message.user { align-self: flex-end; background: linear-gradient(135deg, #4f78ff, #6cc8ff); color: #ffffff; border-bottom-right-radius: 6px; white-space: normal; }
@@ -24,3 +27,13 @@ body { margin: 0; font-family: Inter, system-ui, -apple-system, Segoe UI, sans-s
 .button:disabled { cursor: not-allowed; opacity: 0.6; }
 .button:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(79, 120, 255, 0.25); }
 .footer { margin-top: 18px; color: #7a8399; font-size: 12px; }
+.attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.attachments:empty { margin: 0; }
+.chip { display: flex; align-items: center; gap: 6px; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 20px; padding: 4px 8px 4px 12px; font-size: 13px; color: #3730a3; max-width: 260px; }
+.chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip em { color: #6366f1; font-style: normal; font-size: 11px; }
+.chip-remove { background: none; border: none; cursor: pointer; color: #818cf8; font-size: 18px; line-height: 1; padding: 0 2px; flex-shrink: 0; }
+.chip-remove:hover { color: #dc2626; }
+.attach-btn { display: flex; align-items: center; justify-content: center; width: 46px; height: 46px; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.6); background: #ffffff; color: #4b5563; cursor: pointer; flex-shrink: 0; transition: background 0.15s, color 0.15s; }
+.attach-btn:hover { background: #f1f5f9; color: #1f2937; }
+.attach-btn.disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }

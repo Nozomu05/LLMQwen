@@ -1,15 +1,105 @@
+import base64
 import json
 import os
+import re
 import sys
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
-from rag.query import run_query_complete
+from rag.query import run_query_stream, warmup
 
 FRONTEND_DIR = Path(__file__).parent
+MAX_TEXT_CHARS = 20_000
+
+# --- vLLM queue monitoring ---
+# Keep in sync with VLLM_MAX_QUEUE in serve.sh.
+_VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://localhost:8000")
+_MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "20"))
+
+
+def get_vllm_queue_stats() -> dict:
+    """
+    Read vLLM Prometheus metrics and return queue state.
+    Returns {"waiting": int, "running": int, "available": bool, "backend": str}.
+    Falls back gracefully when vLLM is unreachable (transformers backend).
+    """
+    backend = os.getenv("LLM_BACKEND", "transformers").lower()
+    if backend != "vllm":
+        return {"waiting": 0, "running": 0, "available": True, "backend": "transformers"}
+
+    try:
+        url = f"{_VLLM_BASE_URL}/metrics"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            text = resp.read().decode("utf-8")
+
+        waiting = 0
+        running = 0
+        for line in text.splitlines():
+            if line.startswith("#"):
+                continue
+            m = re.match(r"vllm:num_requests_waiting\{[^}]*\}\s+(\S+)", line)
+            if m:
+                waiting = int(float(m.group(1)))
+                continue
+            m = re.match(r"vllm:num_requests_running\{[^}]*\}\s+(\S+)", line)
+            if m:
+                running = int(float(m.group(1)))
+
+        return {
+            "waiting": waiting,
+            "running": running,
+            "available": waiting < _MAX_QUEUE_SIZE,
+            "backend": "vllm",
+        }
+    except Exception:
+        # vLLM not reachable — report as unavailable so the frontend shows a warning
+        return {"waiting": -1, "running": -1, "available": False, "backend": "vllm_unreachable"}
+
+
+def extract_text_from_bytes(filename: str, file_bytes: bytes) -> str:
+    ext = Path(filename).suffix.lower()
+    try:
+        if ext == ".pdf":
+            import fitz
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            text = "\n".join(page.get_text() for page in doc)
+        elif ext == ".docx":
+            from docx import Document as DocxDoc
+            doc = DocxDoc(BytesIO(file_bytes))
+            text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        elif ext == ".pptx":
+            from pptx import Presentation
+            prs = Presentation(BytesIO(file_bytes))
+            parts = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        parts.append(shape.text)
+            text = "\n".join(parts)
+        elif ext in (".xlsx", ".xls", ".ods"):
+            import openpyxl
+            wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+            rows = []
+            for ws in wb.worksheets:
+                rows.append(f"[Sheet: {ws.title}]")
+                for row in ws.iter_rows(values_only=True):
+                    row_str = "\t".join(str(c) if c is not None else "" for c in row)
+                    if row_str.strip():
+                        rows.append(row_str)
+            text = "\n".join(rows)
+        else:
+            text = file_bytes.decode("utf-8", errors="replace")
+    except Exception as e:
+        text = f"[Error extracting text from {filename}: {e}]"
+
+    if len(text) > MAX_TEXT_CHARS:
+        text = text[:MAX_TEXT_CHARS] + f"\n\n[... truncated at {MAX_TEXT_CHARS:,} characters]"
+    return text
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -27,7 +117,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split('?')[0]
-        
+
+        if path == "/api/queue":
+            self._send(200, json.dumps(get_vllm_queue_stats()))
+            return
+
         if path == "/":
             html_path = FRONTEND_DIR / "index.html"
             with open(html_path, 'r', encoding='utf-8') as f:
@@ -53,10 +147,23 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, json.dumps({"error": "Not found"}))
 
     def do_POST(self):
+        if self.path == "/api/upload":
+            self._handle_upload()
+            return
         if self.path != "/api/query":
             self._send(404, json.dumps({"error": "Not found"}))
             return
         try:
+            # Reject early when the vLLM queue is at capacity so the user gets
+            # an immediate "try again" instead of a browser timeout.
+            stats = get_vllm_queue_stats()
+            if stats["backend"] == "vllm" and not stats["available"]:
+                waiting = stats["waiting"]
+                self._send(503, json.dumps({
+                    "error": f"Server is at capacity ({waiting} requests queued). Please try again in a few minutes."
+                }))
+                return
+
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length).decode("utf-8")
             payload = json.loads(raw)
@@ -64,8 +171,60 @@ class Handler(BaseHTTPRequestHandler):
             if not question:
                 self._send(400, json.dumps({"error": "Question is required"}))
                 return
-            answer, model_name, sources = run_query_complete(question)
-            self._send(200, json.dumps({"answer": answer, "model": model_name, "sources": sources}))
+            documents = payload.get("documents", [])
+            extra_docs = [
+                (d["filename"], d["text"])
+                for d in documents
+                if isinstance(d, dict) and d.get("text")
+            ]
+            gen = run_query_stream(question, extra_docs=extra_docs or None)
+            try:
+                # first next() runs retrieval — if it raises we can still send a proper HTTP error
+                first_event = next(gen)
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                self._send(500, json.dumps({"error": str(exc)}))
+                return
+
+            # Retrieval succeeded — commit to SSE stream
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            def _write(evt):
+                self.wfile.write(f"data: {json.dumps(evt)}\n\n".encode("utf-8"))
+                self.wfile.flush()
+
+            _write(first_event)
+            for event in gen:
+                _write(event)
+
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            try:
+                self.wfile.write(f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n".encode("utf-8"))
+                self.wfile.flush()
+            except Exception:
+                pass
+
+    def _handle_upload(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length).decode("utf-8")
+            payload = json.loads(raw)
+            filename = str(payload.get("filename", "document"))
+            data_url = str(payload.get("data", ""))
+            if "," in data_url:
+                data_url = data_url.split(",", 1)[1]
+            file_bytes = base64.b64decode(data_url)
+            text = extract_text_from_bytes(filename, file_bytes)
+            self._send(200, json.dumps({"filename": filename, "text": text, "chars": len(text)}))
         except Exception as exc:
             import traceback
             traceback.print_exc()
@@ -74,8 +233,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     load_dotenv()
+    warmup()
     host = os.getenv("FRONTEND_HOST", "127.0.0.1")
-    port = int(os.getenv("FRONTEND_PORT", "8000"))
+    port = int(os.getenv("FRONTEND_PORT", "8080"))
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"Frontend running at http://{host}:{port}")
     server.serve_forever()

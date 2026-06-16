@@ -1,407 +1,554 @@
 import os
+import re
 import sys
+import warnings
 from pathlib import Path
 from typing import List
 
+# fastembed 0.5.2+ changed intfloat/multilingual-e5-large from CLS to mean pooling.
+# Both ingest.py and query.py use the same fastembed version, so the behaviour is
+# consistent. Suppress the warning since it is informational only.
+warnings.filterwarnings(
+    "ignore",
+    message=".*multilingual-e5-large now uses mean pooling.*",
+    category=UserWarning,
+)
+
 from dotenv import load_dotenv
-try:
-    from .transformers_llm import TransformersLLM  # type: ignore
-except Exception:
-    from transformers_llm import TransformersLLM  # type: ignore
+load_dotenv(override=True)
+
 from langchain_community.embeddings import FastEmbedEmbeddings  # type: ignore
 from langchain_huggingface import HuggingFaceEmbeddings  # type: ignore
 from langchain_chroma import Chroma  # type: ignore
 from langchain_core.documents import Document  # type: ignore
 from langchain_core.prompts import ChatPromptTemplate  # type: ignore
+from langchain_openai import ChatOpenAI  # type: ignore
 from sentence_transformers import CrossEncoder
 import time
-import hashlib
-import random
-
-try:
-    import numpy as _np
-except Exception:
-    _np = None
-try:
-    import torch as _torch
-except Exception:
-    _torch = None
 
 
 class Reranker:
-    
+
     def __init__(self, model_name: str, top_n: int):
         self.model_name = model_name
         self.top_n = top_n
         print(f"Loading reranker: {model_name}...")
-        self.reranker = CrossEncoder(model_name)
-    
+        cache_folder = os.getenv("HF_CACHE_DIR") or None
+        self.reranker = CrossEncoder(model_name, device=os.getenv("RERANKER_DEVICE", "cpu"), cache_folder=cache_folder)
+
     def compress_documents(self, documents: List[Document], query: str) -> List[Document]:
         if not documents:
             return documents
-        
         pairs = [[query, doc.page_content] for doc in documents]
-        scores = self.reranker.predict(pairs)
-        
+        reranker_batch_size = int(os.getenv("RERANKER_BATCH_SIZE", "16"))
+        scores = self.reranker.predict(pairs, batch_size=reranker_batch_size, show_progress_bar=False)
         doc_score_pairs = list(zip(documents, scores))
         doc_score_pairs.sort(key=lambda x: x[1], reverse=True)
         return [doc for doc, _ in doc_score_pairs[:self.top_n]]
 
 
+def _clean_chunk_text(text: str) -> str:
+    # Remove any non-space run ≥18 chars — always an extraction artifact in
+    # standardisation docs (covers pure-alpha, hyphenated, and mixed tokens).
+    # 18 is the lowest safe threshold: legitimate hyphenated terms top out at
+    # ~13 chars (e.g. "Dense-Dynamic"), while missing-space artifacts like
+    # "onsStaticsequences" (18) and "Dense-Dynamicsequences" (22) are caught.
+    # Apostrophes (straight and curly) are excluded so French contractions like
+    # "d'expérimentations" (18 chars incl. apostrophe) are not wrongly removed.
+    text = re.sub(r"[^\s'‘’]{18,}", '', text)
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+    return text.strip()
+
+
 def format_docs(docs: List[Document]) -> str:
-    return "\n\n".join(f"[Source: {d.metadata.get('source', 'unknown')}]\n{d.page_content}" for d in docs)
+    return "\n\n".join(
+        f"[Source: {d.metadata.get('source', 'unknown')}]\n{_clean_chunk_text(d.page_content)}"
+        for d in docs
+    )
 
 
-def get_embeddings():
-    """Get embeddings based on the configured provider."""
-    embedding_provider = os.getenv("EMBEDDING_PROVIDER", "fastembed").lower()
-    embedding_model = os.getenv("EMBEDDING_MODEL")
-    
+_LANG_INSTRUCTIONS = {
+    "fr": "Réponds en français.",
+    "de": "Antworte auf Deutsch.",
+    "es": "Responde en español.",
+    "it": "Rispondi in italiano.",
+    "pt": "Responda em português.",
+    "nl": "Antwoord in het Nederlands.",
+    "zh": "请用中文回答。",
+    "ja": "日本語で答えてください。",
+    "ko": "한국어로 답하세요.",
+    "ar": "أجب باللغة العربية.",
+}
+
+
+def detect_language(text: str) -> tuple[str, str]:
+    """Return (index_lang, response_hint) where response_hint is an explicit
+    instruction for the model to respond in the detected language (empty for English)."""
+    try:
+        from langdetect import detect
+        lang_code = detect(text)
+        if lang_code == "en":
+            return "en", ""
+        hint = _LANG_INSTRUCTIONS.get(lang_code, f"Respond in the same language as the question ({lang_code}).")
+        return "other", f" ({hint})"
+    except Exception:
+        return "other", ""
+
+
+def get_embeddings(lang: str = "en"):
+    if lang == "en":
+        embedding_provider = os.getenv("EMBEDDING_PROVIDER_EN", "fastembed").lower()
+        embedding_model = os.getenv("EMBEDDING_MODEL_EN", "BAAI/bge-base-en-v1.5")
+    else:
+        embedding_provider = os.getenv("EMBEDDING_PROVIDER_ML", "fastembed").lower()
+        embedding_model = os.getenv("EMBEDDING_MODEL_ML", "intfloat/multilingual-e5-large")
+
+    cache_key = (embedding_provider, embedding_model)
+    if cache_key in _EMBEDDINGS_CACHE:
+        return _EMBEDDINGS_CACHE[cache_key]
+
     if embedding_provider == "huggingface":
-        return HuggingFaceEmbeddings(
+        emb = HuggingFaceEmbeddings(
             model_name=embedding_model,
             model_kwargs={'device': 'cpu'},
             encode_kwargs={'normalize_embeddings': True}
         )
-    else: 
-        return FastEmbedEmbeddings(
+    else:
+        # Force CPU execution so GPU memory stays free for vLLM.
+        # fastembed uses ONNX Runtime; CPUExecutionProvider prevents it from
+        # reserving CUDA memory that vLLM needs.
+        emb = FastEmbedEmbeddings(
             model_name=embedding_model,
-            max_length=512
+            max_length=512,
+            additional_kwargs={"providers": ["CPUExecutionProvider"]},
         )
+
+    _EMBEDDINGS_CACHE[cache_key] = emb
+    return emb
+
+
+_RERANKER_CACHE: dict = {}
+_EMBEDDINGS_CACHE: dict = {}
+_VECTORSTORE_CACHE: dict = {}
+_LLM_CACHE: dict = {}
+
+
+def generate_hyde_query(query: str, llm) -> str:
+    """Generate a hypothetical answer (HyDE) to use as the retrieval query.
+
+    The fake answer is never shown to the user — it is only embedded and used
+    for vector similarity search so that results-table chunks (BD-rate values,
+    sequence names, percentages) score higher than with the original vague query.
+    The original query is still used for reranking and generation.
+    """
+    from langchain_core.messages import SystemMessage, HumanMessage
+    try:
+        result = llm.invoke([
+            SystemMessage(content="You are a technical expert in video compression and MPEG standardization."),
+            HumanMessage(content=(
+                "Write exactly 2-3 sentences IN ENGLISH answering this question. "
+                "Include specific metrics (BD-rate, PSNR), sequence names, and method names "
+                "that would appear in MPEG documents. Make a reasonable technical guess.\n\n"
+                f"Question: {query}"
+            )),
+        ])
+        hypo = result.content
+        sentences = re.split(r'(?<=[.!?])\s+', hypo.strip())
+        return " ".join(sentences[:3])
+    except Exception:
+        return query
+
+
+_RAG_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a precise technical expert in video compression, 3D content coding, and international standards (MPEG, ISO/IEC). Answer strictly from the provided context.
+
+Give a detailed, well-structured answer that covers all relevant findings: methodology, configurations, measurements (BD-rate, PSNR, dB gains, percentages), sequence names, method names, and session/meeting references. Group related findings with sub-headings when it helps clarity. End with 1–2 sentences summarising the key takeaways.
+
+Rules:
+- Only use information present in the context. Never fabricate data or numbers.
+- Copy measurements verbatim — do not round or estimate.
+- Omit [m12345], [1], [LuYu] and similar reference markers.
+- Use acronyms exactly as written (VSS-PCC, TMAP, RAHT, V3C, SEI, …).
+- Skip any garbled or concatenated text fragments from the context.
+- Do not add follow-up questions or new Q:/A: turns after the answer.
+
+Respond in the same language as the question."""),
+    ("human", """Context:
+{context}
+
+Question: {question}
+
+Answer:""")
+])
+
+
+def _build_answer_header(query: str, docs: List[Document]) -> str:
+    sources = list(dict.fromkeys(d.metadata.get("source", "unknown") for d in docs))
+
+    session_pat = re.compile(r'(?:session|meeting)\s+(\d{2,3})', re.IGNORECASE)
+    seen_sessions: set = set()
+    sessions = []
+    for doc in docs:
+        for m in session_pat.finditer(doc.page_content):
+            n = m.group(1)
+            if n not in seen_sessions:
+                seen_sessions.add(n)
+                sessions.append(n)
+
+    sources_str = ", ".join(f"`{s}`" for s in sources)
+    session_str = f"  \n**Sessions referenced:** {', '.join(sessions)}" if sessions else ""
+
+    return (
+        f"**Question:** {query}  \n"
+        f"**Sources consulted:** {sources_str}{session_str}  \n\n"
+        f"**Findings:**\n"
+    )
+
+
+def retrieve_from_all_indexes(query: str, verbose: bool = False, retrieval_query: str = None) -> List[Document]:
+    """Query the unified Chroma index and rerank results.
+
+    A single multilingual index (intfloat/multilingual-e5-large) and reranker
+    (bge-reranker-v2-m3) are used for all queries so that English and French
+    questions retrieve the same candidate chunks and receive consistent answers.
+
+    retrieval_query: optional override for the embedding step (used by HyDE).
+    If provided, this text is embedded instead of the original query.
+    The original query is always used for reranking and answer generation.
+    """
+    k_total = int(os.getenv("RETRIEVAL_CHUNKS", "300"))
+    use_reranking = os.getenv("USE_RERANKING", "true").lower() == "true"
+    top_n = int(os.getenv("TOP_N_RERANK", "8"))
+
+    chroma_dir = Path(os.getenv("CHROMA_DIR", "storage/chroma")).resolve()
+    if not chroma_dir.exists():
+        raise FileNotFoundError(
+            f"No vector store found at {chroma_dir}. Run ingestion first: python rag/ingest.py"
+        )
+
+    if verbose:
+        print(f"Loading Chroma from: {chroma_dir}")
+
+    start = time.time()
+    embeddings = get_embeddings("other")  # always use the multilingual model
+    vs_key = str(chroma_dir)
+    if vs_key not in _VECTORSTORE_CACHE:
+        _VECTORSTORE_CACHE[vs_key] = Chroma(persist_directory=str(chroma_dir), embedding_function=embeddings)
+    vs = _VECTORSTORE_CACHE[vs_key]
+
+    if retrieval_query:
+        # HyDE: caller already prepared the retrieval query (hypothetical answer).
+        # Save the raw hypothetical for reranking (before adding the instruct prefix).
+        rerank_query = retrieval_query
+        embedding_model = os.getenv("EMBEDDING_MODEL_ML", "")
+        if "instruct" in embedding_model.lower():
+            retrieval_query = f"Instruct: Retrieve relevant passages that answer the question\nQuery: {retrieval_query}"
+        if verbose:
+            print(f"HyDE retrieval query: {retrieval_query[:120]}...")
+    else:
+        # Translate non-English queries to English before embedding so that French/German/etc.
+        # questions produce the same embedding vector as their English equivalents.
+        # All indexed documents are in English, so an English query always gives the best
+        # cosine similarity match regardless of the original question language.
+        query_lang, _ = detect_language(query)
+        if query_lang != "en":
+            try:
+                from deep_translator import GoogleTranslator
+                retrieval_query = GoogleTranslator(source="auto", target="en").translate(query)
+                if verbose:
+                    print(f"Query translated for retrieval: {retrieval_query}")
+            except Exception:
+                retrieval_query = query
+        else:
+            retrieval_query = query
+
+        # intfloat/multilingual-e5-large-instruct requires an instruction prefix on the query.
+        embedding_model = os.getenv("EMBEDDING_MODEL_ML", "")
+        if "instruct" in embedding_model.lower():
+            retrieval_query = f"Instruct: Retrieve relevant passages that answer the question\nQuery: {retrieval_query}"
+
+        rerank_query = query
+
+    docs = vs.as_retriever(search_kwargs={"k": k_total}).invoke(retrieval_query)
+
+    if verbose:
+        print(f"Loaded in {time.time() - start:.2f}s")
+
+    reranker_model = os.getenv("RERANKER_MODEL_ML", "BAAI/bge-reranker-v2-m3")
+    if use_reranking and docs:
+        if verbose:
+            print(f"Using reranking to select top {top_n} from {len(docs)} chunks...")
+        compressor = _get_reranker(reranker_model, top_n)
+        docs = compressor.compress_documents(docs, rerank_query)
+        if verbose:
+            print(f"Reranked to {len(docs)} most relevant chunks")
+    else:
+        docs = docs[:top_n]
+
+    return docs
+
+
+def _get_reranker(model_name: str, top_n: int) -> Reranker:
+    key = (model_name, top_n)
+    if key not in _RERANKER_CACHE:
+        _RERANKER_CACHE[key] = Reranker(model_name=model_name, top_n=top_n)
+    return _RERANKER_CACHE[key]
+
+
+def warmup():
+    """Preload the reranker and embedding model at startup so the first request isn't slow."""
+    reranker_model = os.getenv("RERANKER_MODEL_ML", "BAAI/bge-reranker-v2-m3")
+    top_n = int(os.getenv("TOP_N_RERANK", "8"))
+    _get_reranker(reranker_model, top_n)
+    get_embeddings("other")
+    print("Warmup complete.")
 
 
 def get_llm():
-
-    load_dotenv()
-
-    model_name = os.getenv("TRANSFORMERS_MODEL")
-    quantization = os.getenv("QUANTIZATION", "none")
-    device = os.getenv("LLM_DEVICE", "auto")
-    seed = int(os.getenv("LLM_SEED", "0"))
-
-    if seed and seed > 0:
-        random.seed(seed)
-        if _np is not None:
-            _np.random.seed(seed)
-        if _torch is not None:
-            try:
-                _torch.manual_seed(seed)
-                _torch.cuda.manual_seed_all(seed)
-                _torch.use_deterministic_algorithms(True)
-            except Exception:
-                pass
-
-    global _LLM_CACHE
-    try:
-        _LLM_CACHE
-    except NameError:
-        _LLM_CACHE = {}
-
-    cache_key = (model_name, quantization, device)
-    if cache_key in _LLM_CACHE:
-        return _LLM_CACHE[cache_key], _LLM_CACHE[cache_key].model_name
+    model_name = os.getenv("VLLM_MODEL", "Qwen/Qwen2.5-14B-Instruct-AWQ")
+    base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000")
+    temperature = float(os.getenv("TEMPERATURE", "0.1"))
+    max_tokens = int(os.getenv("MAX_NEW_TOKENS", "2048"))
+    cache_key = (model_name, base_url, temperature, max_tokens)
+    if cache_key not in _LLM_CACHE:
+        _LLM_CACHE[cache_key] = ChatOpenAI(
+            base_url=f"{base_url}/v1",
+            api_key="dummy",
+            model=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            streaming=True,
+        )
+        print(f"Using vLLM server: {base_url}")
+    return _LLM_CACHE[cache_key], model_name
 
 
-    llm = TransformersLLM()
+def _truncate_context(context_text: str, max_new_tokens: int, max_context_length: int) -> str:
+    # ~800 tokens reserved for system prompt + question overhead; 1 token ≈ 4 chars
+    overhead_tokens = int(os.getenv("PROMPT_OVERHEAD_TOKENS", "800"))
+    available_tokens = max_context_length - max_new_tokens - overhead_tokens
+    if available_tokens <= 0:
+        available_tokens = 1000
+    max_chars = available_tokens * 4
+    if len(context_text) <= max_chars:
+        return context_text
+    truncated = context_text[:max_chars]
+    last_para = truncated.rfind('\n\n')
+    if last_para > max_chars * 0.8:
+        truncated = truncated[:last_para]
+    return truncated
 
-    _LLM_CACHE[cache_key] = llm
-    return llm, llm.model_name
 
+def run_query_stream(query: str, extra_docs=None):
+    """Generator that yields SSE event dicts for streaming responses.
 
-
-def run_query_complete(query: str, provider: str = "ollama") -> tuple[str, str, list[str]]:
+    First yield is always {"type": "meta", ...} — it fires after retrieval
+    completes so callers can commit to streaming only once retrieval succeeds.
+    Subsequent yields are {"type": "chunk", "text": ...} and a final
+    {"type": "done"}.
     """
-    Run a complete query and return (answer, model_name, sources).
-    Used by the frontend API.
-    """
-    load_dotenv()
-    
-    chroma_dir = Path(os.getenv("CHROMA_DIR")).resolve()
-    
-    if not chroma_dir.exists():
-        raise FileNotFoundError(f"Vector store directory not found: {chroma_dir}. Run ingestion first.")
-    
-    embeddings = get_embeddings()
-    
-    vectorstore = Chroma(persist_directory=str(chroma_dir), embedding_function=embeddings)
-    
-    k_chunks = int(os.getenv("RETRIEVAL_CHUNKS"))
-    top_n = int(os.getenv("TOP_N_RERANK"))
-    use_reranking = os.getenv("USE_RERANKING").lower() == "true"
-    
-    base_retriever = vectorstore.as_retriever(search_kwargs={"k": k_chunks})
-    docs = base_retriever.invoke(query)
-
-    if use_reranking and len(docs) > 0:
-        reranker_model = os.getenv("RERANKER_MODEL")
-        compressor = Reranker(model_name=reranker_model, top_n=top_n)
-        docs = compressor.compress_documents(docs, query)
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are an expert technical assistant that provides extremely detailed, comprehensive, and in-depth answers based on the given context.
-
-🌍 LANGUAGE REQUIREMENT - CRITICAL:
-- ALWAYS respond in the SAME LANGUAGE as the question
-- If the question is in French, respond in French
-- If the question is in English, respond in English
-- If the question is in Spanish, respond in Spanish
-- Apply this to ANY language the user asks in
-- Maintain the SAME level of technical detail and quality regardless of language
-- Technical terms can remain in English if there's no standard translation, but explain them in the question's language
-
-CRITICAL INSTRUCTIONS - YOUR ANSWERS MUST BE DETAILED AND THOROUGH:
-
-📝 LENGTH & DEPTH REQUIREMENTS:
-- Write LONG, COMPREHENSIVE answers (minimum 300-500 words)
-- Go into EXTENSIVE technical detail on every relevant point
-- Provide COMPLETE explanations, not summaries
-- Expand on ALL key concepts with thorough background information
-- Include detailed methodology, implementation specifics, and technical reasoning
-
-🔬 TECHNICAL DETAIL REQUIREMENTS:
-- Include ALL relevant numbers, metrics, percentages, and quantitative data
-- Explain technical terminology and concepts in depth
-- Describe methodologies, algorithms, and approaches thoroughly
-- Discuss implementation details, constraints, and trade-offs extensively
-- Compare different approaches with detailed analysis
-- Provide context for why specific choices or values were used
-
-📊 STRUCTURE YOUR DETAILED ANSWER:
-1. **Introduction/Overview**: Explain the context and scope (2-3 paragraphs)
-2. **Main Analysis**: Deep dive into each aspect (multiple detailed paragraphs)
-   - Break down complex topics into subsections
-   - Provide step-by-step explanations
-   - Include specific examples with full details
-3. **Technical Details**: Explain HOW and WHY things work
-   - Describe underlying mechanisms
-   - Discuss implications and consequences
-   - Compare alternatives when relevant
-4. **Synthesis**: Connect different pieces of information
-   - Identify patterns and relationships
-   - Discuss broader implications
-5. **Conclusion**: Summarize key insights comprehensively
-
-💡 ANALYTICAL DEPTH:
-- Don't just state facts - EXPLAIN THE REASONING behind them
-- Analyze cause-and-effect relationships thoroughly
-- Discuss trade-offs, advantages, and limitations in detail
-- Compare and contrast different approaches extensively
-- Identify implications for practice, implementation, or future work
-- When citing numbers, explain their significance and context
-
-📚 USE THE CONTEXT FULLY:
-- Quote specific passages with proper citations [Source: filename]
-- Reference multiple sources when they provide complementary information
-- If sources disagree, explain the differences in detail
-- Extract and explain ALL relevant technical details from the context
-
-⚠️ QUALITY OVER BREVITY:
-- NEVER give short, superficial answers
-- Each paragraph should be substantial (5-7 sentences minimum)
-- Elaborate on every important point
-- Think "university lecture" not "quick summary"
-- If the context is rich in detail, your answer should be too
-
-Remember: The user wants DETAILED, IN-DEPTH, COMPREHENSIVE answers. More detail is ALWAYS better than less."""),
-        ("human", """Question: {question}
-
-Context:
-{context}
-
-⚡ IMPORTANT: Provide an EXTREMELY DETAILED, COMPREHENSIVE, and IN-DEPTH answer. Write at length with thorough explanations.
-
-Follow this structure for maximum detail:
-1. **Analyze the Question**: What exactly is being asked? What are the key components?
-2. **Examine the Context**: What relevant information is available? What technical details are provided?
-3. **Provide Comprehensive Answer**: Write a LONG, DETAILED response covering all aspects
-4. **Technical Deep Dive**: Go into extensive technical specifics
-5. **Synthesis & Conclusions**: Connect all information with thorough reasoning
-
-Write your answer now (aim for 300-500+ words with extensive technical detail):""")
-    ])
-
+    _, lang_hint = detect_language(query)
     llm, model_name = get_llm()
-    chain = prompt | llm
+
+    hyde_query = None
+    if os.getenv("USE_HYDE", "false").lower() == "true":
+        hyde_query = generate_hyde_query(query, llm)
+    docs = retrieve_from_all_indexes(query, retrieval_query=hyde_query)
+
+    max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "2048"))
+    max_context_length = int(os.getenv("VLLM_MAX_CONTEXT", "8192"))
 
     context_text = format_docs(docs)
-    temp = os.getenv("TEMPERATURE", str(getattr(llm, "temperature", "unknown")))
-    seed = os.getenv("LLM_SEED", "0")
-    sources = [d.metadata.get("source", "unknown") for d in docs]
-    prompt_payload = f"question:{query}\ncontext:{context_text}"
-    prompt_hash = hashlib.sha256(prompt_payload.encode("utf-8")).hexdigest()
+    if extra_docs:
+        uploaded = "\n\n".join(
+            f"[Uploaded document: {name}]\n{text}"
+            for name, text in extra_docs
+        )
+        context_text = "## User-uploaded documents\n\n" + uploaded + "\n\n## Retrieved context\n\n" + context_text
+
+    sources = list(dict.fromkeys(d.metadata.get("source", "unknown") for d in docs))
+    if extra_docs:
+        uploaded_names = [name for name, _ in extra_docs]
+        sources = uploaded_names + [s for s in sources if s not in uploaded_names]
+
+    context_text = _truncate_context(context_text, max_new_tokens, max_context_length)
+    header = _build_answer_header(query, docs)
+
+    yield {"type": "meta", "model": model_name, "sources": sources, "header": header}
+
+    chain = _RAG_PROMPT | llm
+    accumulated = ""
+    _SUMMARY_MARKERS = (
+        "**Summary**", "**Résumé**", "**Zusammenfassung**",
+        "**Conclusión**", "**Conclusione**", "**Conclusão**",
+        "**Samenvatting**",
+    )
+
+    for chunk in chain.stream({"question": query + lang_hint, "context": context_text}):
+        text = chunk.content
+        if not text:
+            continue
+        text = re.sub(r'\[m\d+\]|\[\d+\]|\[[A-Za-z][A-Za-z0-9]{1,}\]', '', text)
+        if re.search(r"[^\s''']{18,}", text):
+            break
+        accumulated += text
+        yield {"type": "chunk", "text": text}
+
+        for _sm in _SUMMARY_MARKERS:
+            _sp = accumulated.find(_sm)
+            if _sp >= 0:
+                _after = accumulated[_sp + 12:]
+                if _after.find('\n\n') >= 50:
+                    yield {"type": "done"}
+                    return
+
+        last_boundary = max(
+            accumulated.rfind('.'), accumulated.rfind('!'),
+            accumulated.rfind('?'), accumulated.rfind('\n')
+        )
+        if len(accumulated) - last_boundary > 400:
+            break
+
+    yield {"type": "done"}
+
+
+def run_query_complete(query: str, extra_docs=None) -> tuple[str, str, list[str]]:
+    """Run a complete RAG query and return (answer, model_name, sources)."""
+    _, lang_hint = detect_language(query)
+    llm, model_name = get_llm()
+
+    hyde_query = None
+    if os.getenv("USE_HYDE", "false").lower() == "true":
+        hyde_query = generate_hyde_query(query, llm)
+    docs = retrieve_from_all_indexes(query, retrieval_query=hyde_query)
+    chain = _RAG_PROMPT | llm
+
+    max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "2048"))
+    max_context_length = int(os.getenv("VLLM_MAX_CONTEXT", "8192"))
+
+    context_text = format_docs(docs)
+    if extra_docs:
+        uploaded = "\n\n".join(
+            f"[Uploaded document: {name}]\n{text}"
+            for name, text in extra_docs
+        )
+        context_text = "## User-uploaded documents\n\n" + uploaded + "\n\n## Retrieved context\n\n" + context_text
+
+    sources = list(dict.fromkeys(d.metadata.get("source", "unknown") for d in docs))
+    if extra_docs:
+        uploaded_names = [name for name, _ in extra_docs]
+        sources = uploaded_names + [s for s in sources if s not in uploaded_names]
+
+    context_text = _truncate_context(context_text, max_new_tokens, max_context_length)
 
     answer = ""
-    for chunk in chain.stream({"question": query, "context": context_text}):
-        if hasattr(chunk, "content"):
-            answer += chunk.content
-        elif hasattr(chunk, "text"):
-            answer += chunk.text
-        else:
-            answer += str(chunk)
+    for chunk in chain.stream({"question": query + lang_hint, "context": context_text}):
+        answer += chunk.content
 
-    sources = [d.metadata.get("source", "unknown") for d in docs]
-    return answer, model_name, sources
+    answer = re.sub(r'\[m\d+\]|\[\d+\]|\[[A-Za-z][A-Za-z0-9]{1,}\]', '', answer)
+    answer = re.sub(r'  +', ' ', answer).strip()
+
+    _SUMMARY_MARKERS = (
+        "**Summary**", "**Résumé**", "**Zusammenfassung**",
+        "**Conclusión**", "**Conclusione**", "**Conclusão**",
+        "**Samenvatting**",
+    )
+    for _sm in _SUMMARY_MARKERS:
+        _sp = answer.find(_sm)
+        if _sp >= 0:
+            _after = answer[_sp + 12:]
+            _blank = _after.find('\n\n')
+            if _blank >= 50:
+                answer = answer[:_sp + 12 + _blank].rstrip()
+            break
+
+    last_end = max(answer.rfind('.'), answer.rfind('!'), answer.rfind('?'))
+    last_newline = answer.rfind('\n')
+    if last_newline > last_end and re.search(r'[A-Za-z0-9%]$', answer[last_newline:].rstrip()):
+        last_end = len(answer.rstrip()) - 1
+    if last_end > 0:
+        answer = answer[:last_end + 1].strip()
+
+    header = _build_answer_header(query, docs)
+    return header + answer, model_name, sources
 
 
 def main() -> None:
-    load_dotenv()
-
-    chroma_dir = Path(os.getenv("CHROMA_DIR")).resolve()
-
-    if not chroma_dir.exists():
-        print(f"Vector store directory not found: {chroma_dir}")
-        print("Run ingestion first: python .\\rag\\ingest.py")
-        sys.exit(1)
-
     query = " ".join(sys.argv[1:]).strip()
     if not query:
-        print("Usage: python .\\rag\\query.py \"<your question>\"")
+        print('Usage: python rag/query.py "<your question>"')
         sys.exit(1)
 
-    print(f"Loading Chroma from: {chroma_dir}")
-    
-    start_time = time.time()
-    embeddings = get_embeddings()
-    
-    vectorstore = Chroma(persist_directory=str(chroma_dir), embedding_function=embeddings)
-    print(f"Loaded in {time.time() - start_time:.2f}s")
-    
-    k_chunks = int(os.getenv("RETRIEVAL_CHUNKS"))
-    top_n = int(os.getenv("TOP_N_RERANK"))
-    use_reranking = os.getenv("USE_RERANKING").lower() == "true"
-    
-    base_retriever = vectorstore.as_retriever(search_kwargs={"k": k_chunks})
-    
-    print("Retrieving context...")
-    docs = base_retriever.invoke(query)
-    
-    if use_reranking and len(docs) > 0:
-        print(f"Using reranking to select top {top_n} from {len(docs)} chunks...")
-        reranker_model = os.getenv("RERANKER_MODEL")
-        compressor = Reranker(model_name=reranker_model, top_n=top_n)
-        docs = compressor.compress_documents(docs, query)
-        print(f"Reranked to {len(docs)} most relevant chunks")
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are an expert technical assistant that provides extremely detailed, comprehensive, and in-depth answers based on the given context.
-
-🌍 LANGUAGE REQUIREMENT - CRITICAL:
-- ALWAYS respond in the SAME LANGUAGE as the question
-- If the question is in French, respond in French
-- If the question is in English, respond in English
-- If the question is in Spanish, respond in Spanish
-- Apply this to ANY language the user asks in
-- Maintain the SAME level of technical detail and quality regardless of language
-- Technical terms can remain in English if there's no standard translation, but explain them in the question's language
-
-CRITICAL INSTRUCTIONS - YOUR ANSWERS MUST BE DETAILED AND THOROUGH:
-
-📝 LENGTH & DEPTH REQUIREMENTS:
-- Write LONG, COMPREHENSIVE answers (minimum 300-500 words)
-- Go into EXTENSIVE technical detail on every relevant point
-- Provide COMPLETE explanations, not summaries
-- Expand on ALL key concepts with thorough background information
-- Include detailed methodology, implementation specifics, and technical reasoning
-
-🔬 TECHNICAL DETAIL REQUIREMENTS:
-- Include ALL relevant numbers, metrics, percentages, and quantitative data
-- Explain technical terminology and concepts in depth
-- Describe methodologies, algorithms, and approaches thoroughly
-- Discuss implementation details, constraints, and trade-offs extensively
-- Compare different approaches with detailed analysis
-- Provide context for why specific choices or values were used
-
-📊 STRUCTURE YOUR DETAILED ANSWER:
-1. **Introduction/Overview**: Explain the context and scope (2-3 paragraphs)
-2. **Main Analysis**: Deep dive into each aspect (multiple detailed paragraphs)
-   - Break down complex topics into subsections
-   - Provide step-by-step explanations
-   - Include specific examples with full details
-3. **Technical Details**: Explain HOW and WHY things work
-   - Describe underlying mechanisms
-   - Discuss implications and consequences
-   - Compare alternatives when relevant
-4. **Synthesis**: Connect different pieces of information
-   - Identify patterns and relationships
-   - Discuss broader implications
-5. **Conclusion**: Summarize key insights comprehensively
-
-💡 ANALYTICAL DEPTH:
-- Don't just state facts - EXPLAIN THE REASONING behind them
-- Analyze cause-and-effect relationships thoroughly
-- Discuss trade-offs, advantages, and limitations in detail
-- Compare and contrast different approaches extensively
-- Identify implications for practice, implementation, or future work
-- When citing numbers, explain their significance and context
-
-📚 USE THE CONTEXT FULLY:
-- Quote specific passages with proper citations [Source: filename]
-- Reference multiple sources when they provide complementary information
-- If sources disagree, explain the differences in detail
-- Extract and explain ALL relevant technical details from the context
-
-⚠️ QUALITY OVER BREVITY:
-- NEVER give short, superficial answers
-- Each paragraph should be substantial (5-7 sentences minimum)
-- Elaborate on every important point
-- Think "university lecture" not "quick summary"
-- If the context is rich in detail, your answer should be too
-
-Remember: The user wants DETAILED, IN-DEPTH, COMPREHENSIVE answers. More detail is ALWAYS better than less."""),
-        ("human", """Question: {question}
-
-Context:
-{context}
-
-⚡ IMPORTANT: Provide an EXTREMELY DETAILED, COMPREHENSIVE, and IN-DEPTH answer. Write at length with thorough explanations.
-
-Follow this structure for maximum detail:
-1. **Analyze the Question**: What exactly is being asked? What are the key components?
-2. **Examine the Context**: What relevant information is available? What technical details are provided?
-3. **Provide Comprehensive Answer**: Write a LONG, DETAILED response covering all aspects
-4. **Technical Deep Dive**: Go into extensive technical specifics
-5. **Synthesis & Conclusions**: Connect all information with thorough reasoning
-
-Write your answer now (aim for 300-500+ words with extensive technical detail):""")
-    ])
-
+    _, lang_hint = detect_language(query)
     llm, model_name = get_llm()
-    chain = prompt | llm
-    context_text = format_docs(docs)
-    temp = os.getenv("TEMPERATURE", str(getattr(llm, "temperature", "unknown")))
-    seed = os.getenv("LLM_SEED", "0")
-    sources = [d.metadata.get("source", "unknown") for d in docs]
-    prompt_payload = f"question:{query}\ncontext:{context_text}"
-    prompt_hash = hashlib.sha256(prompt_payload.encode("utf-8")).hexdigest()
+
+    hyde_query = None
+    if os.getenv("USE_HYDE", "false").lower() == "true":
+        hyde_query = generate_hyde_query(query, llm)
+    try:
+        docs = retrieve_from_all_indexes(query, verbose=True, retrieval_query=hyde_query)
+    except FileNotFoundError as e:
+        print(e)
+        print("Run ingestion first: python rag/ingest.py")
+        sys.exit(1)
+
+    chain = _RAG_PROMPT | llm
+    max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "2048"))
+    max_context_length = int(os.getenv("VLLM_MAX_CONTEXT", "8192"))
+    context_text = _truncate_context(format_docs(docs), max_new_tokens, max_context_length)
+    sources = list(dict.fromkeys(d.metadata.get("source", "unknown") for d in docs))
 
     print(f"Querying model: {model_name}\n")
-    
+    header = _build_answer_header(query, docs)
     print("=== Answer ===\n")
+    print(header, end="", flush=True)
     query_start = time.time()
-    
-    try:
-        for chunk in chain.stream({"question": query, "context": context_text}):
-            if hasattr(chunk, "content"):
-                print(chunk.content, end="", flush=True)
-            elif hasattr(chunk, "text"):
-                print(chunk.text, end="", flush=True)
-            else:
-                print(str(chunk), end="", flush=True)
-        print(f"\n\n[Query completed in {time.time() - query_start:.2f}s]")
-    except Exception as e:
-        msg = str(e).lower()
-        if "model" in msg and "not found" in msg:
-            print(f"\nModel '{model_name}' not found in Ollama.")
-            print("Pull it first (example):")
-            print(f"  ollama pull {model_name}")
-            print("CPU-friendly alternative:")
-            print("  ollama pull qwen2.5:3b-instruct")
-            sys.exit(1)
-        raise
-    
+
+    accumulated = ""
+    _stop_patterns = ["Human:", "\nQ:", "\nA:", "\nQuestion:"]
+    _SUMMARY_MARKERS = (
+        "**Summary**", "**Résumé**", "**Zusammenfassung**",
+        "**Conclusión**", "**Conclusione**", "**Conclusão**",
+        "**Samenvatting**", "**결론**", "**总结**", "**まとめ**",
+    )
+    for chunk in chain.stream({"question": query + lang_hint, "context": context_text}):
+        text = chunk.content
+        text = re.sub(r'\[m\d+\]|\[\d+\]|\[[A-Za-z][A-Za-z0-9]{1,}\]', '', text)
+        accumulated += text
+        print(text, end="", flush=True)
+
+        if any(p in accumulated for p in _stop_patterns):
+            break
+        if accumulated.count("\n---") >= 2:
+            break
+        _summary_pos = next(
+            (accumulated.find(m) for m in _SUMMARY_MARKERS if m in accumulated), -1
+        )
+        if _summary_pos >= 0:
+            _after_summary = accumulated[_summary_pos + 12:]
+            _blank = _after_summary.find('\n\n')
+            if _blank >= 50:
+                break
+        if re.search(r"[^\s'‘’]{18,}", text):
+            break
+        last_boundary = max(
+            accumulated.rfind('.'), accumulated.rfind('!'),
+            accumulated.rfind('?'), accumulated.rfind('\n')
+        )
+        if len(accumulated) - last_boundary > 400:
+            break
+
+    print(f"\n\n[Query completed in {time.time() - query_start:.2f}s]")
+
     print("\n\n=== Sources ===")
-    for i, d in enumerate(docs, 1):
-        print(f"{i}. {d.metadata.get('source', 'unknown')}")
+    seen = set()
+    i = 1
+    for d in docs:
+        src = d.metadata.get("source", "unknown")
+        if src not in seen:
+            print(f"{i}. {src}")
+            seen.add(src)
+            i += 1
 
 
 if __name__ == "__main__":
