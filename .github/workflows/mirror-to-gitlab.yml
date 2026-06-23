@@ -1,0 +1,23 @@
+name: Mirror to GitLab
+
+on:
+  push:
+    branches:
+      - '**'
+  push_tags:
+    tags:
+      - '**'
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to GitLab
+        run: |
+          git remote add gitlab http://oauth2:${{ secrets.GITLAB_TOKEN }}@abyss.int-evry.fr/software/Minh/LLMQwen.git
+          git push gitlab --mirror
