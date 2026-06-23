@@ -1,10 +1,13 @@
 #!/bin/bash
-# Start the vLLM OpenAI-compatible API server.
-# Run once in a tmux/screen session — the model stays loaded in GPU memory.
-# The frontend connects to it when LLM_BACKEND=vllm is set in .env.
+# Start the full RAG stack:
+#   1. vLLM server       (GPU 1 - RTX 5090,  port 8000)
+#   2. LLM service       (CPU,                port 8012)
+#   3. Reranker service  (GPU 0 - RTX 2080Ti, port 8011)
+#   4. Search service    (GPU 0 - RTX 2080Ti, port 8010)
+#   5. Frontend          (CPU,                port 8080)
 #
-# Usage:
-#   tmux new -s llm
+# Each process runs in its own tmux pane so you can monitor logs separately.
+# Requires tmux. Run with:
 #   bash serve.sh
 
 set -e
@@ -13,39 +16,103 @@ cd "$SCRIPT_DIR"
 
 source .venv/bin/activate
 
-# Load project env vars (HF_HOME, VLLM_MODEL, etc.)
+# Load project env vars
 set -o allexport
 source .env
 set +o allexport
 
-# RTX 5090 is at PCI bus index 1 (index 0 is the 2080 Ti, which is excluded).
-# Override with VLLM_GPU= in .env if your setup differs.
 MODEL="${VLLM_MODEL:-Qwen/Qwen2.5-14B-Instruct-AWQ}"
-PORT="${VLLM_PORT:-8000}"
+VLLM_PORT="${VLLM_PORT:-8000}"
 GPU="${VLLM_GPU:-1}"
-
-# RTX 5090 has 32 GB VRAM. With 14B AWQ (~8 GB weights) the remaining
-# ~24 GB goes to KV cache — enough for ~15 concurrent sequences safely.
 MAX_SEQS="${VLLM_MAX_SEQS:-15}"
 
-echo "Starting vLLM server"
-echo "  Model     : $MODEL"
-echo "  Port      : $PORT"
-echo "  GPU       : cuda:$GPU  (RTX 5090)"
-echo "  Max seqs  : $MAX_SEQS  (concurrent inference slots)"
-echo "  Cache     : ${HF_HOME:-~/.cache/huggingface}"
+LLM_SVC_PORT="${LLM_SERVICE_PORT:-8012}"
+RERANKER_SVC_PORT="${RERANKER_SERVICE_PORT:-8011}"
+SEARCH_SVC_PORT="${SEARCH_SERVICE_PORT:-8010}"
+FRONTEND_PORT="${FRONTEND_PORT:-8080}"
+
+SESSION="rag"
+
+# Kill any existing session with the same name
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+
+echo "Starting RAG stack in tmux session '$SESSION' ..."
 echo ""
 
-CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$GPU" \
-python -m vllm.entrypoints.openai.api_server \
-    --model "$MODEL" \
-    --port "$PORT" \
-    --tensor-parallel-size 1 \
-    --quantization awq \
-    --dtype float16 \
-    --gpu-memory-utilization 0.90 \
-    --max-model-len 8192 \
-    --max-num-seqs "$MAX_SEQS" \
-    --served-model-name "$MODEL" \
-    --trust-remote-code \
-    --no-enable-log-requests
+# ── Window 0: vLLM server ──────────────────────────────────────────────────
+tmux new-session -d -s "$SESSION" -n "vllm"
+tmux send-keys -t "$SESSION:vllm" "
+cd '$SCRIPT_DIR'
+source .venv/bin/activate
+set -o allexport; source .env; set +o allexport
+echo '=== vLLM server (GPU $GPU - RTX 5090, port $VLLM_PORT) ==='
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES='$GPU' \\
+python -m vllm.entrypoints.openai.api_server \\
+    --model '$MODEL' \\
+    --port $VLLM_PORT \\
+    --tensor-parallel-size 1 \\
+    --quantization awq \\
+    --dtype float16 \\
+    --gpu-memory-utilization 0.90 \\
+    --max-model-len 8192 \\
+    --max-num-seqs $MAX_SEQS \\
+    --served-model-name '$MODEL' \\
+    --trust-remote-code \\
+    --no-enable-log-requests \\
+    --enable-chunked-prefill \\
+    --enable-prefix-caching
+" Enter
+
+# ── Window 1: LLM service ─────────────────────────────────────────────────
+tmux new-window -t "$SESSION" -n "llm-svc"
+tmux send-keys -t "$SESSION:llm-svc" "
+cd '$SCRIPT_DIR'
+source .venv/bin/activate
+set -o allexport; source .env; set +o allexport
+echo '=== LLM service (port $LLM_SVC_PORT) ==='
+uvicorn services.llm.app:app --host 0.0.0.0 --port $LLM_SVC_PORT
+" Enter
+
+# ── Window 2: Reranker service ────────────────────────────────────────────
+tmux new-window -t "$SESSION" -n "reranker-svc"
+tmux send-keys -t "$SESSION:reranker-svc" "
+cd '$SCRIPT_DIR'
+source .venv/bin/activate
+set -o allexport; source .env; set +o allexport
+echo '=== Reranker service (GPU 0 - RTX 2080 Ti, port $RERANKER_SVC_PORT) ==='
+CUDA_DEVICE_ORDER=PCI_BUS_ID \\
+uvicorn services.reranker.app:app --host 0.0.0.0 --port $RERANKER_SVC_PORT
+" Enter
+
+# ── Window 3: Search service ──────────────────────────────────────────────
+tmux new-window -t "$SESSION" -n "search-svc"
+tmux send-keys -t "$SESSION:search-svc" "
+cd '$SCRIPT_DIR'
+source .venv/bin/activate
+set -o allexport; source .env; set +o allexport
+echo '=== Search service (GPU 0 - RTX 2080 Ti, port $SEARCH_SVC_PORT) ==='
+CUDA_DEVICE_ORDER=PCI_BUS_ID \\
+uvicorn services.search.app:app --host 0.0.0.0 --port $SEARCH_SVC_PORT
+" Enter
+
+# ── Window 4: Frontend ───────────────────────────────────────────────────
+tmux new-window -t "$SESSION" -n "frontend"
+tmux send-keys -t "$SESSION:frontend" "
+cd '$SCRIPT_DIR'
+source .venv/bin/activate
+set -o allexport; source .env; set +o allexport
+echo '=== Frontend (port $FRONTEND_PORT) ==='
+python frontend/app.py
+" Enter
+
+echo "All services starting in tmux session '$SESSION'."
+echo ""
+echo "Attach with:  tmux attach -t $SESSION"
+echo "Switch panes: Ctrl-b then 0=vllm  1=llm-svc  2=reranker-svc  3=search-svc  4=frontend"
+echo ""
+echo "Service URLs:"
+echo "  vLLM server      : http://localhost:$VLLM_PORT"
+echo "  LLM service      : http://localhost:$LLM_SVC_PORT"
+echo "  Reranker service : http://localhost:$RERANKER_SVC_PORT"
+echo "  Search service   : http://localhost:$SEARCH_SVC_PORT"
+echo "  Frontend         : http://localhost:$FRONTEND_PORT  ← open this in browser"

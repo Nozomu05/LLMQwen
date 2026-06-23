@@ -2,19 +2,18 @@ import base64
 import json
 import os
 import re
-import sys
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
+import requests
 from dotenv import load_dotenv
-from rag.query import run_query_stream, warmup
 
 FRONTEND_DIR = Path(__file__).parent
 MAX_TEXT_CHARS = 20_000
+
+_SEARCH_SERVICE_URL = os.getenv("SEARCH_SERVICE_URL", "http://localhost:8010")
 
 # --- vLLM queue monitoring ---
 # Keep in sync with VLLM_MAX_QUEUE in serve.sh.
@@ -172,35 +171,44 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": "Question is required"}))
                 return
             documents = payload.get("documents", [])
-            extra_docs = [
-                (d["filename"], d["text"])
+            docs_payload = [
+                {"filename": d["filename"], "text": d["text"]}
                 for d in documents
                 if isinstance(d, dict) and d.get("text")
             ]
-            gen = run_query_stream(question, extra_docs=extra_docs or None)
+
             try:
-                # first next() runs retrieval — if it raises we can still send a proper HTTP error
-                first_event = next(gen)
-            except Exception as exc:
-                import traceback
-                traceback.print_exc()
-                self._send(500, json.dumps({"error": str(exc)}))
+                resp = requests.post(
+                    f"{_SEARCH_SERVICE_URL}/query",
+                    json={"query": question, "documents": docs_payload or None},
+                    stream=True,
+                    timeout=180,
+                )
+            except requests.RequestException as exc:
+                self._send(502, json.dumps({"error": f"Search service unreachable: {exc}"}))
                 return
 
-            # Retrieval succeeded — commit to SSE stream
+            if resp.status_code != 200:
+                try:
+                    detail = resp.json().get("detail", resp.text)
+                except Exception:
+                    detail = resp.text or f"HTTP {resp.status_code}"
+                self._send(resp.status_code, json.dumps({"error": detail}))
+                return
+
+            # Proxy the SSE stream from the search service to the browser
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
-            def _write(evt):
-                self.wfile.write(f"data: {json.dumps(evt)}\n\n".encode("utf-8"))
-                self.wfile.flush()
-
-            _write(first_event)
-            for event in gen:
-                _write(event)
+            try:
+                for raw in resp.iter_content(chunk_size=None):
+                    self.wfile.write(raw)
+                    self.wfile.flush()
+            except Exception:
+                pass
 
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -233,7 +241,6 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     load_dotenv()
-    warmup()
     host = os.getenv("FRONTEND_HOST", "127.0.0.1")
     port = int(os.getenv("FRONTEND_PORT", "8080"))
     server = ThreadingHTTPServer((host, port), Handler)
