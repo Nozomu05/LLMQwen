@@ -19,4 +19,5 @@ jobs:
       - name: Push to GitLab
         run: |
           git remote add gitlab https://Minh:${{ secrets.GITLAB_TOKEN }}@abyss.int-evry.fr/software/Minh/LLMQwen.git
-          git push gitlab --mirror
+          git push gitlab --all --force
+          git push gitlab --tags --force
