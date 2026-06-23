@@ -67,6 +67,7 @@ def load_docx_raw_xml(file_path: str) -> List[Document]:
         except Exception as e:
             raise ValueError(f"Failed to extract from XML: {e}")
 
+
 def _format_docx_table(table) -> str:
     """Format a python-docx Table object as a markdown table string."""
     if not table.rows:
