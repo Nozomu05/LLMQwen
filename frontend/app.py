@@ -241,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     load_dotenv()
-    host = os.getenv("FRONTEND_HOST", "127.0.0.1")
+    host = os.getenv("FRONTEND_HOST", "0.0.0.0")
     port = int(os.getenv("FRONTEND_PORT", "8080"))
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"Frontend running at http://{host}:{port}")
