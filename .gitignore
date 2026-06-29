@@ -46,9 +46,9 @@ ingestion_errors.log
 
 # Office temporary files
 ~$*
-# Ignore everything inside docs/ but not the folder itself
+# Ignore everything inside docs/ but track the folder via .gitkeep
 docs/*
-!docs/
+!docs/.gitkeep
 # Ignore everything inside storage/ but not the folder itself
 storage/*
 !storage/
