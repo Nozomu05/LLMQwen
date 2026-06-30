@@ -82,11 +82,13 @@ class HydeRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _get_llm():
-    model_name = os.getenv("VLLM_MODEL", "Qwen/Qwen2.5-14B-Instruct-AWQ")
-    base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000")
-    temperature = float(os.getenv("TEMPERATURE", "0.1"))
-    max_tokens = int(os.getenv("MAX_NEW_TOKENS", "2048"))
-    key = (model_name, base_url, temperature, max_tokens)
+    model_name = os.environ["VLLM_MODEL"]
+    base_url = os.environ["VLLM_BASE_URL"]
+    temperature = float(os.environ["TEMPERATURE"])
+    max_tokens = int(os.environ["MAX_NEW_TOKENS"])
+    top_p = float(os.environ["TOP_P"])
+    frequency_penalty = float(os.environ["FREQUENCY_PENALTY"])
+    key = (model_name, base_url, temperature, max_tokens, top_p, frequency_penalty)
     if key not in _LLM_CACHE:
         _LLM_CACHE[key] = ChatOpenAI(
             base_url=f"{base_url}/v1",
@@ -94,6 +96,8 @@ def _get_llm():
             model=model_name,
             temperature=temperature,
             max_tokens=max_tokens,
+            top_p=top_p,
+            frequency_penalty=frequency_penalty,
             streaming=True,
         )
     return _LLM_CACHE[key], model_name
@@ -113,7 +117,7 @@ def _format_chunks(chunks: list[Chunk]) -> str:
 
 
 def _truncate_context(context_text: str, max_new_tokens: int, max_context_length: int) -> str:
-    overhead_tokens = int(os.getenv("PROMPT_OVERHEAD_TOKENS", "800"))
+    overhead_tokens = int(os.environ["PROMPT_OVERHEAD_TOKENS"])
     available_tokens = max_context_length - max_new_tokens - overhead_tokens
     if available_tokens <= 0:
         available_tokens = 1000
@@ -210,8 +214,8 @@ def generate_hyde(req: HydeRequest):
 def generate(req: GenerateRequest):
     """Assemble the RAG prompt and stream the answer token-by-token as SSE."""
     llm, model_name = _get_llm()
-    max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "2048"))
-    max_context_length = int(os.getenv("VLLM_MAX_CONTEXT", "8192"))
+    max_new_tokens = int(os.environ["MAX_NEW_TOKENS"])
+    max_context_length = int(os.environ["VLLM_MAX_CONTEXT"])
 
     context_text = _format_chunks(req.chunks)
     if req.extra_docs:

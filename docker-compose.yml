@@ -2,19 +2,30 @@ networks:
   rag-net:
     driver: bridge
 
+volumes:
+  # Named volume for Hugging Face model weights.
+  # On first use, Docker creates it empty and models are downloaded automatically.
+  # To pre-populate from your existing host cache, run once:
+  #   docker run --rm \
+  #     -v hf-cache:/dst \
+  #     -v /space/storage/homes/minh/.cache/huggingface:/src:ro \
+  #     alpine sh -c "cp -r /src/. /dst/"
+  hf-cache:
+
 services:
 
   # ── One-shot ingestion job ────────────────────────────────────────────────
   # Run manually:  docker compose run --rm ingest
   # Not started by default (profile guard).
   ingest:
+    image: nozomu05/llmqwen-ingest:latest
     build:
       context: .
       dockerfile: rag/Dockerfile
     profiles:
       - ingest
     env_file:
-      - path: .env
+      - path: rag/.env
         required: false
     environment:
       - DOCS_DIR=/app/docs
@@ -22,50 +33,10 @@ services:
       - HF_CACHE_DIR=/cache/huggingface
       - HF_HOME=/cache/huggingface
     volumes:
-      # docs/ is read+write so the zip extractor can unpack archives in-place
       - ./docs:/app/docs
-      # storage/ is shared with the search service — ingest writes, search reads
       - ./storage:/app/storage
-      - ${HF_CACHE_DIR:-/tmp/hf-cache}:/cache/huggingface
+      - hf-cache:/cache/huggingface
     restart: "no"
-    networks:
-      - rag-net
-
-  # ── LLM service ──────────────────────────────────────────────────────────
-  llm:
-    build:
-      context: .
-      dockerfile: services/llm/Dockerfile
-    ports:
-      - "8012:8012"
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      # vLLM runs on the host — rewrite its URL so the container can reach it
-      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://host.docker.internal:8000}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks:
-      - rag-net
-
-  # ── Reranker service ──────────────────────────────────────────────────────
-  reranker:
-    build:
-      context: .
-      dockerfile: services/reranker/Dockerfile
-    ports:
-      - "8011:8011"
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      # Use Docker service name instead of localhost
-      - LLM_SERVICE_URL=http://llm:8012
-      - HF_CACHE_DIR=/cache/huggingface
-      - HF_HOME=/cache/huggingface
-    volumes:
-      - ${HF_CACHE_DIR:-/tmp/hf-cache}:/cache/huggingface
     networks:
       - rag-net
     deploy:
@@ -73,30 +44,80 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["0"]   # host GPU 0 = RTX 2080 Ti
+              device_ids: ["0"]
+              capabilities: [gpu]
+
+  # ── LLM service ──────────────────────────────────────────────────────────
+  llm:
+    image: nozomu05/llmqwen-llm:latest
+    build:
+      context: .
+      dockerfile: services/llm/Dockerfile
+    ports:
+      - "8012:8012"
+    env_file:
+      - path: services/llm/.env
+        required: false
+    environment:
+      - VLLM_BASE_URL=http://host.docker.internal:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - rag-net
+
+  # ── Reranker service ──────────────────────────────────────────────────────
+  reranker:
+    image: nozomu05/llmqwen-reranker:latest
+    build:
+      context: .
+      dockerfile: services/reranker/Dockerfile
+    ports:
+      - "8011:8011"
+    env_file:
+      - path: services/reranker/.env
+        required: false
+    environment:
+      - LLM_SERVICE_URL=http://llm:8012
+      - HF_CACHE_DIR=/cache/huggingface
+      - HF_HOME=/cache/huggingface
+    volumes:
+      - hf-cache:/cache/huggingface
+    networks:
+      - rag-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
               capabilities: [gpu]
 
   # ── Search service ────────────────────────────────────────────────────────
   search:
+    image: nozomu05/llmqwen-search:latest
     build:
       context: .
       dockerfile: services/search/Dockerfile
     ports:
       - "8010:8010"
     env_file:
-      - path: .env
+      - path: services/search/.env
         required: false
     environment:
-      # Use Docker service names instead of localhost
       - RERANKER_SERVICE_URL=http://reranker:8011
       - LLM_SERVICE_URL=http://llm:8012
-      # Chroma DB is bind-mounted at /app/storage — same host path as ingest writes to
       - CHROMA_DIR=/app/storage/chroma
       - HF_CACHE_DIR=/cache/huggingface
       - HF_HOME=/cache/huggingface
     volumes:
-      # Shared with the ingest service: ingest writes here, search reads here
       - ./storage:/app/storage
-      - ${HF_CACHE_DIR:-/tmp/hf-cache}:/cache/huggingface
+      - hf-cache:/cache/huggingface
     networks:
       - rag-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]

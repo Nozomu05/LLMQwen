@@ -43,13 +43,13 @@ class RerankRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _get_reranker() -> CrossEncoder:
-    model_name = os.getenv("RERANKER_MODEL_ML", "BAAI/bge-reranker-v2-m3")
+    model_name = os.environ["RERANKER_MODEL_ML"]
     if model_name not in _RERANKER_CACHE:
-        cache_folder = os.getenv("HF_CACHE_DIR") or None
         _RERANKER_CACHE[model_name] = CrossEncoder(
             model_name,
-            device=os.getenv("RERANKER_DEVICE", "cpu"),
-            cache_folder=cache_folder,
+            device=os.environ["RERANKER_DEVICE"],
+            cache_folder=os.environ["HF_CACHE_DIR"],
+            max_length=int(os.environ["RERANKER_MAX_LENGTH"]),
         )
     return _RERANKER_CACHE[model_name]
 
@@ -77,8 +77,8 @@ def rerank(req: RerankRequest):
     """Score all chunks with the CrossEncoder, keep the top N, then call the LLM service."""
     t_start = time.time()
 
-    top_n = int(os.getenv("TOP_N_RERANK", "8"))
-    llm_url = os.getenv("LLM_SERVICE_URL", "http://localhost:8012")
+    top_n = int(os.environ["TOP_N_RERANK"])
+    llm_url = os.environ["LLM_SERVICE_URL"]
 
     chunks = req.chunks
     scoring_query = req.rerank_query or req.query
@@ -86,7 +86,7 @@ def rerank(req: RerankRequest):
     if chunks:
         reranker = _get_reranker()
         pairs = [[scoring_query, c.content] for c in chunks]
-        batch_size = int(os.getenv("RERANKER_BATCH_SIZE", "16"))
+        batch_size = int(os.environ["RERANKER_BATCH_SIZE"])
         scores = reranker.predict(pairs, batch_size=batch_size, show_progress_bar=False)
         ranked = sorted(zip(chunks, scores), key=lambda x: x[1], reverse=True)
         chunks = [c for c, _ in ranked[:top_n]]

@@ -632,10 +632,10 @@ def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> tuple[List[Doc
 def main() -> None:
     load_dotenv()
 
-    docs_dir = Path(os.getenv("DOCS_DIR")).resolve()
-    batch_size = int(os.getenv("BATCH_SIZE"))
-    chunk_size = int(os.getenv("CHUNK_SIZE"))
-    chunk_overlap = int(os.getenv("CHUNK_OVERLAP"))
+    docs_dir = Path(os.environ["DOCS_DIR"]).resolve()
+    batch_size = int(os.environ["BATCH_SIZE"])
+    chunk_size = int(os.environ["CHUNK_SIZE"])
+    chunk_overlap = int(os.environ["CHUNK_OVERLAP"])
 
     if not docs_dir.exists():
         docs_dir.mkdir(parents=True, exist_ok=True)
@@ -687,7 +687,7 @@ def main() -> None:
 
     import time
 
-    def make_embeddings(embedding_provider, embedding_model, embedding_device, label=""):
+    def make_embeddings(embedding_provider, embedding_model, embedding_device, embedding_batch_size, label=""):
         print(f"\nSetting up embeddings for {label}...")
         print(f"  Provider: {embedding_provider}")
         print(f"  Model: {embedding_model}")
@@ -697,7 +697,7 @@ def main() -> None:
             return HuggingFaceEmbeddings(
                 model_name=embedding_model,
                 model_kwargs={'device': embedding_device},
-                encode_kwargs={'normalize_embeddings': True}
+                encode_kwargs={'normalize_embeddings': True, 'batch_size': embedding_batch_size}
             )
         else:
             print("  Using FastEmbed embeddings (optimized, limited models)")
@@ -758,12 +758,13 @@ def main() -> None:
 
         print(f"\n✓ {label} index complete in {time.time() - start_index:.2f}s")
 
-    embedding_device = os.getenv("EMBEDDING_DEVICE", "cuda").lower()
-    embedding_provider = os.getenv("EMBEDDING_PROVIDER_ML", "huggingface").lower()
-    embedding_model = os.getenv("EMBEDDING_MODEL_ML", "intfloat/multilingual-e5-large")
-    chunking_strategy = os.getenv("CHUNKING_STRATEGY") or "semantic"
+    embedding_device = os.environ["EMBEDDING_DEVICE"].lower()
+    embedding_provider = os.environ["EMBEDDING_PROVIDER_ML"].lower()
+    embedding_model = os.environ["EMBEDDING_MODEL_ML"]
+    chunking_strategy = os.environ["CHUNKING_STRATEGY"]
+    embedding_batch_size = int(os.environ["EMBEDDING_BATCH_SIZE"])
 
-    embeddings = make_embeddings(embedding_provider, embedding_model, embedding_device, label="Unified (multilingual)")
+    embeddings = make_embeddings(embedding_provider, embedding_model, embedding_device, embedding_batch_size, label="Unified (multilingual)")
 
     print(f"  Splitting into chunks (strategy: {chunking_strategy})...")
     start_split = time.time()
@@ -776,7 +777,7 @@ def main() -> None:
     chunks = splitter.split_documents(all_docs)
     print(f"  Created {len(chunks)} chunks in {time.time() - start_split:.2f}s")
 
-    chroma_dir = Path(os.getenv("CHROMA_DIR", "storage/chroma")).resolve()
+    chroma_dir = Path(os.environ["CHROMA_DIR"]).resolve()
     build_index(
         chunks,
         embeddings,

@@ -1,724 +1,456 @@
-# RAG System with Qwen
+# LLMQwen
 
-A Retrieval-Augmented Generation (RAG) system that lets you query your documents using Qwen models from HuggingFace Transformers locally.
+A chatbot that answers questions about your own documents. You give it PDFs, Word files, PowerPoints, etc., and you can ask it anything — it finds the relevant parts and writes a precise answer.
 
----
-
-## Table of Contents
-
-- [Installation and Setup](#installation-and-setup)
-  - [Linux Prerequisites](#linux-prerequisites)
-  - [Step 1: Setup Python Environment](#step-1-setup-python-environment)
-  - [Step 2: Install Pandoc (Optional)](#step-2-install-pandoc-optional)
-  - [Step 3: Configure Environment](#step-3-configure-environment)
-  - [Step 4: Add Your Documents](#step-4-add-your-documents)
-  - [Step 5: Ingest Documents](#step-5-ingest-documents)
-  - [Step 6: Start the Frontend](#step-6-start-the-frontend)
-- [Command-Line Query (Optional)](#command-line-query-optional)
-  - [Interactive Mode (Recommended)](#interactive-mode-recommended)
-  - [Single Query Mode](#single-query-mode)
-- [Performance Notes](#performance-notes)
-  - [CPU vs GPU Mode](#cpu-vs-gpu-mode)
-  - [Model Recommendations by Hardware](#model-recommendations-by-hardware)
-- [Model Upgrade Guide](#model-upgrade-guide)
-  - [Current Setup (Fast/Testing)](#current-setup-fasttesting)
-  - [Upgrading to Production Quality](#upgrading-to-production-quality)
-  - [🏆 Recommended Production Configurations](#-recommended-production-configurations)
-  - [⚡ Performance Impact Summary](#-performance-impact-summary)
-- [🌍 Multilingual Functionality Guide](#-multilingual-functionality-guide)
-  - [How Each Component Affects Multilingual Support](#how-each-component-affects-multilingual-support)
-  - [Current System Multilingual Capability](#current-system-multilingual-capability)
-  - [Upgrading to Full Multilingual Support](#upgrading-to-full-multilingual-support)
-  - [Testing Multilingual Functionality](#testing-multilingual-functionality)
-- [Chunking Configuration Guide](#chunking-configuration-guide)
-  - [What is Chunking?](#what-is-chunking)
-  - [Current Default Settings](#current-default-settings)
-  - [How Chunk Size Affects Quality](#how-chunk-size-affects-quality)
-  - [Why Overlap Matters](#why-overlap-matters)
-  - [Recommended Settings by Document Type](#recommended-settings-by-document-type)
-  - [How to Adjust Chunking](#how-to-adjust-chunking)
-  - [Chunk Size Impact on Your System](#chunk-size-impact-on-your-system)
+Everything runs **locally on your machine**. No data is sent to the cloud.
 
 ---
 
-## Installation and Setup
+## How it works (simple version)
 
-### Linux Prerequisites
+When you ask a question, the system does four things in order:
 
-**For Ubuntu/Debian-based distributions:**
+1. **Search** — it converts your question into numbers and uses those numbers to find the most relevant pieces of your documents
+2. **Re-rank** — it scores each piece more carefully to keep only the best ones
+3. **Generate** — it feeds those pieces to the AI model and asks it to write an answer
+4. **Display** — the answer streams back to your browser word by word
+
+The AI model (Qwen) runs on your GPU. The search and re-ranking helpers run in Docker containers so they are easy to start and stop.
+
+---
+
+## What you need before starting
+
+### A Linux machine with an NVIDIA GPU
+
+This project runs on **Linux only** (Ubuntu 22.04+ or similar). It requires a powerful NVIDIA graphics card because the AI model is very large.
+
+| What | Minimum | Why |
+|---|---|---|
+| GPU memory (VRAM) | 16 GB | The AI model needs this to fit in the GPU |
+| Extra GPU memory | 4 GB | For the search and re-rank helpers |
+| RAM | 32 GB | For loading documents and running everything |
+| Disk space | 50 GB free | Models are large files |
+
+> If you only have one GPU that's 24 GB or more (e.g. RTX 3090, RTX 4090), everything can share it.
+
+### Software to install first
+
+You need four things installed before you start. Follow the steps below in order.
+
+---
+
+## Step 0 — Install the required software
+
+### 0a. Check that your NVIDIA driver is working
+
+Open a terminal and run:
 ```bash
-# Update package list
-sudo apt update
-
-# Install Python 3.10+ and pip
-sudo apt install python3 python3-pip python3-venv
-
-# Install development tools (required for some Python packages)
-sudo apt install build-essential python3-dev
+nvidia-smi
 ```
+You should see a table showing your GPU. If you get "command not found", you need to install the NVIDIA driver for your GPU model from [nvidia.com](https://www.nvidia.com/Download/index.aspx).
 
-**For Fedora/RHEL/CentOS:**
+### 0b. Install Docker
+
+Docker is a tool that runs programs in isolated boxes so they don't interfere with each other. Think of it like a lightweight virtual machine.
+
 ```bash
-# Install Python 3.10+ and pip
-sudo dnf install python3 python3-pip
+# This command downloads and installs Docker automatically
+curl -fsSL https://get.docker.com | sh
 
-# Install development tools
-sudo dnf groupinstall "Development Tools"
-sudo dnf install python3-devel
+# This lets you run Docker without typing "sudo" every time
+# You must log out and log back in after running this
+sudo usermod -aG docker $USER
 ```
 
-**For Arch Linux:**
+After logging back in, verify it works:
 ```bash
-# Install Python and pip
-sudo pacman -S python python-pip
-
-# Install base development tools
-sudo pacman -S base-devel
+docker run hello-world
 ```
+You should see a message saying "Hello from Docker!".
 
-**Verify Python installation:**
+### 0c. Install the NVIDIA plugin for Docker
+
+By default, Docker containers cannot see your GPU. This plugin adds that ability:
+
 ```bash
-python3 --version  # Should be 3.10 or higher
-pip3 --version
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+sudo apt update && sudo apt install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
 ```
 
-### Step 1: Setup Python Environment
-
-**Windows:**
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-**Note:** If you get an execution policy error:
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
-
-**macOS/Linux:**
+Verify it works (you should see the same GPU table as before):
 ```bash
+docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi
+```
+
+### 0d. Install Python 3.11 or higher
+
+```bash
+python3 --version
+```
+
+If the version shown is below 3.11, install a newer version:
+```bash
+# Ubuntu / Debian
+sudo apt install python3.11 python3.11-venv python3.11-pip
+```
+
+---
+
+## Step 1 — Download the project
+
+```bash
+git clone https://github.com/Nozomu05/LLMQwen.git
+cd LLMQwen
+```
+
+---
+
+## Step 2 — Create a Python environment and install vLLM
+
+vLLM is the program that actually runs the AI model on your GPU. It runs directly on your machine (not in Docker) so it can use the GPU as efficiently as possible.
+
+```bash
+# Create an isolated Python environment so packages don't conflict with anything else on your machine
 python3 -m venv .venv
-source .venv/bin/activate
-```
 
-**Install dependencies (all platforms):**
-```bash
+# Activate it — you must do this every time you open a new terminal
+source .venv/bin/activate
+
+# Install vLLM and the frontend dependencies
+pip install vllm
 pip install -r requirements.txt
 ```
 
-**Note:** The first time you run a query, the Qwen model (~28GB for 14B model) will download automatically to `~/.cache/huggingface/`. This may take some time depending on your internet connection.
+---
 
-### Step 2: Install Pandoc (Optional)
+## Step 3 — Configure the project
 
-Only needed if you have OpenDocument (.odt) files:
+Each part of the project has a configuration file. You need to create these files from the provided templates.
 
-**Windows:**
-```powershell
-winget install --id JohnMacFarlane.Pandoc -e
-```
+Run these four commands:
 
-**macOS:**
 ```bash
-brew install pandoc
+cp services/llm/.env.example     services/llm/.env
+cp services/reranker/.env.example services/reranker/.env
+cp services/search/.env.example   services/search/.env
+cp rag/.env.example               rag/.env
 ```
 
-**Linux:**
-```bash
-# Ubuntu/Debian
-sudo apt update
-sudo apt install pandoc
-
-# Fedora/RHEL/CentOS
-sudo dnf install pandoc
-
-# Arch Linux
-sudo pacman -S pandoc
-```
-
-### Step 3: Configure Environment
-
-**Windows:**
-```powershell
-Copy-Item .env.example .env
-```
-
-**macOS/Linux:**
-```bash
-cp .env.example .env
-```
-
-Edit `.env` with your settings:
-```env
-# Model Configuration
-LLM_PROVIDER=transformers
-TRANSFORMERS_MODEL=Qwen/Qwen2.5-14B-Instruct
-MAX_NEW_TOKENS=4096
-TEMPERATURE=0
-LLM_SEED=42
-QUANTIZATION=4bit
-
-# Device Configuration (auto, cuda, or cpu)
-LLM_DEVICE=auto
-EMBEDDING_DEVICE=cuda
-RERANKER_DEVICE=cuda
-
-# Embedding Configuration
-EMBEDDING_PROVIDER=huggingface
-EMBEDDING_MODEL=intfloat/multilingual-e5-large-instruct
-
-# Retrieval Settings
-RETRIEVAL_CHUNKS=100
-TOP_N_RERANK=8
-USE_RERANKING=true
-
-# Document Processing
-CHUNK_SIZE=800
-CHUNK_OVERLAP=100
-```
-
-**Note:** If using a lower-spec computer, change to `TRANSFORMERS_MODEL=Qwen/Qwen2.5-7B-Instruct` for faster performance. If you don't have a GPU, set all device settings to `cpu`.
-
-### Step 4: Add Your Documents
-
-Place your documents (Word, PDF, PowerPoint, Text, Markdown, etc.) in the `docs/` folder.
-
-### Step 5: Ingest Documents
-
-Run the ingestion script to process your documents:
-
-**Windows:**
-```powershell
-python rag\ingest.py
-```
-
-**macOS/Linux:**
-```bash
-python rag/ingest.py
-```
-
-This will:
-- Extract ZIP files automatically
-- Load and process all documents
-- Generate embeddings
-- Store vectors in the database
-
-### Step 6: Start the Frontend
-
-Start the web interface:
-
-**Windows:**
-```powershell
-python frontend\app.py
-```
-
-**macOS/Linux:**
-```bash
-python frontend/app.py
-```
-
-The server will start at: **http://127.0.0.1:8000**
-
-Open this URL in your browser to start querying your documents!
+Now open each `.env` file and change the values marked below.
 
 ---
 
-## Command-Line Query (Optional)
+### `services/llm/.env` — controls the AI model
 
-### Interactive Mode (Recommended)
+The only thing you **must** change is the model name if you are using a different one:
 
-For multiple queries without reloading the model each time:
-
-**macOS/Linux:**
-```bash
-python rag/query_interactive.py
+```
+VLLM_MODEL=Qwen/Qwen3-14B-AWQ
 ```
 
-**Windows:**
-```powershell
-python rag\query_interactive.py
-```
-
-This loads the model **once** and keeps it in memory. You can then ask multiple questions without the 15-second checkpoint loading delay.
-
-**Example session:**
-```
-Query: What is V-PCC?
-[Answer streams in real-time...]
-
-Query: How does it compare to G-PCC?
-[Answer streams immediately - no reload!]
-
-Query: quit
-```
-
-### Single Query Mode
-
-For one-off queries from the command line:
-
-**macOS/Linux:**
-```bash
-python rag/query.py "Your question here"
-```
-
-**Windows:**
-```powershell
-python rag\query.py "Your question here"
-```
-
-**Note:** This reloads the model each time (~15s startup)
+This must match exactly the model you will start in Step 5. Leave everything else as-is for now.
 
 ---
 
-## Performance Notes
+### `services/reranker/.env` — controls the re-ranking helper
 
-### CPU vs GPU Mode
+Change `HF_CACHE_DIR` and `HF_HOME` to the folder where AI models are stored on your machine. This is usually `~/.cache/huggingface` but replace `~` with your actual home folder path:
 
-The system can run on either CPU or GPU for optimal performance. You can configure which device each component uses in your `.env` file:
-
-```env
-# Device configuration
-# Options: auto (auto-detect GPU), cuda (force GPU), cpu (force CPU)
-LLM_DEVICE=auto              # Qwen language model
-EMBEDDING_DEVICE=cuda        # Document/query embeddings
-RERANKER_DEVICE=cuda         # Re-ranking model
+```
+HF_CACHE_DIR=/home/yourname/.cache/huggingface
+HF_HOME=/home/yourname/.cache/huggingface
 ```
 
-**Device Options:**
-- `auto` - Automatically detects and uses GPU if available (recommended for LLM)
-- `cuda` - Forces GPU usage (fastest, requires NVIDIA GPU with CUDA)
-- `cpu` - Forces CPU usage (slower but works on any computer)
+To find your home folder path, run `echo $HOME` in a terminal.
 
-**Performance Comparison (14B model):**
-- **GPU Mode (cuda):** Fast responses (1-2 seconds)
-- **CPU-Only Mode (cpu):** Slower responses (8-15 seconds) but works on any computer
-- **Auto Mode (auto):** Best of both worlds - uses GPU if available, falls back to CPU
-
-**Recommended Configurations:**
-
-*For systems with NVIDIA GPU:*
-```env
-LLM_DEVICE=auto              # Use GPU if available
-EMBEDDING_DEVICE=cuda        # Embeddings are 10-50x faster on GPU
-RERANKER_DEVICE=cuda         # Re-ranking is faster on GPU
+If you only have one GPU, change `cuda:0` to `cpu` so the re-ranker doesn't compete with the AI model for GPU memory:
 ```
-
-*For CPU-only systems (no GPU):*
-```env
-LLM_DEVICE=cpu
-EMBEDDING_DEVICE=cpu
 RERANKER_DEVICE=cpu
 ```
 
-*For systems with limited GPU memory:*
-```env
-LLM_DEVICE=cpu               # Save GPU memory
-EMBEDDING_DEVICE=cuda        # Embeddings use less memory
-RERANKER_DEVICE=cpu          # Only when needed
-```
-
-**Note:** After changing device settings, restart the application for changes to take effect. Re-ingestion is not required unless you change `EMBEDDING_DEVICE` after already ingesting documents.
-
-### Model Recommendations by Hardware
-
-| RAM Available | Recommended Model | CPU Query Time | Quality |
-|---------------|-------------------|----------------|----------|
-| 8GB | qwen2.5:7b-instruct | 3-5 seconds | Good |
-| 16GB+ | qwen2.5:14b-instruct | 8-15 seconds | Excellent |
-| 32GB+ | qwen2.5:32b | 30-60 seconds | Best |
-
-**Note:** These times are for CPU-only mode. GPU mode is 6-10x faster.
 ---
 
-## Model Upgrade Guide
+### `services/search/.env` — controls the document search
 
-### Current Setup (Fast/Testing)
-Your system is currently configured for **speed and testing**:
-- **Embedding:** `sentence-transformers/all-MiniLM-L6-v2` (384-dim, very fast)
-- **Reranker:** `BAAI/bge-reranker-base` (good quality)
-- **LLM:** `qwen2.5:14b-instruct` (excellent balance)
+Same as above — change `HF_CACHE_DIR` and `HF_HOME` to your home folder:
 
-### Upgrading to Production Quality
-
-#### 🚀 **Embedding Model Upgrades**
-
-**Current:** `sentence-transformers/all-MiniLM-L6-v2` (384-dim)
-- Speed: ⚡⚡⚡⚡⚡ Very Fast (5x faster than BGE-large)
-- Quality: ⭐⭐⭐ Good
-- Use case: Testing, prototyping, fast iterations
-
-**Option 1 - Balanced:** `BAAI/bge-base-en-v1.5` (768-dim)
-- Speed: ⚡⚡⚡⚡ Fast (2x faster than BGE-large)
-- Quality: ⭐⭐⭐⭐ Very Good
-- Use case: Production with good performance/quality balance
-- **Recommended for most users**
-
-**Option 2 - Best Quality:** `BAAI/bge-large-en-v1.5` (1024-dim)
-- Speed: ⚡⚡⚡ Moderate
-- Quality: ⭐⭐⭐⭐⭐ Excellent
-- Use case: Production where quality is critical
-- Trade-off: Slower ingestion (but queries remain fast)
-
-**Option 3 - Multilingual:** `BAAI/bge-m3` (1024-dim)
-- Speed: ⚡⚡⚡ Moderate  
-- Quality: ⭐⭐⭐⭐⭐ Excellent
-- Use case: Multi-language documents (100+ languages)
-- Supports: Chinese, French, Spanish, German, etc.
-
-**To upgrade embedding model:**
-```env
-# In .env file, change:
-EMBEDDING_MODEL=BAAI/bge-base-en-v1.5  # or bge-large-en-v1.5
 ```
-Then re-run: `python rag/ingest.py`
-
-#### 🎯 **Reranker Model Upgrades**
-
-**Current:** `BAAI/bge-reranker-base` (278M params)
-- Speed: ⚡⚡⚡⚡ Fast
-- Quality: ⭐⭐⭐⭐ Very Good
-- Already excellent for most use cases
-
-**Option 1 - Higher Quality:** `BAAI/bge-reranker-large` (560M params)
-- Speed: ⚡⚡⚡ Moderate
-- Quality: ⭐⭐⭐⭐⭐ Excellent
-- Use case: When answer quality is critical
-- Trade-off: 2x slower reranking (still fast overall)
-
-**Option 2 - Best Available:** `BAAI/bge-reranker-v2-m3` (568M params)
-- Speed: ⚡⚡⚡ Moderate
-- Quality: ⭐⭐⭐⭐⭐ State-of-the-art
-- Use case: Maximum accuracy, multilingual support
-- Supports: 100+ languages
-
-**To upgrade reranker:**
-```env
-# In .env file, change:
-RERANKER_MODEL=BAAI/bge-reranker-large  # or bge-reranker-v2-m3
+HF_CACHE_DIR=/home/yourname/.cache/huggingface
+HF_HOME=/home/yourname/.cache/huggingface
 ```
-No re-ingestion needed, changes apply immediately!
 
-#### 🤖 **LLM Model Upgrades**
-
-**Current:** `qwen2.5:14b-instruct` (14B params, 8GB VRAM/16GB RAM)
-- Speed: ⚡⚡⚡⚡ Fast
-- Quality: ⭐⭐⭐⭐ Excellent
-- Already very good for most tasks
-
-**Option 1 - More Capable:** `qwen2.5:32b-instruct` (32B params, 20GB VRAM/32GB RAM)
-- Speed: ⚡⚡⚡ Moderate (2x slower)
-- Quality: ⭐⭐⭐⭐⭐ Outstanding
-- Use case: Complex reasoning, technical documents
-- Requirements: 32GB+ RAM recommended
-
-**Option 2 - Maximum Quality:** `Qwen/Qwen2.5-72B-Instruct` (72B params, 48GB VRAM/64GB RAM)
-- Speed: ⚡⚡ Slow (5x slower)
-- Quality: ⭐⭐⭐⭐⭐ Best available
-- Use case: Research, critical analysis, highest accuracy
-- Requirements: 64GB+ RAM, powerful hardware
-
-**Option 3 - Faster Lightweight:** `Qwen/Qwen2.5-7B-Instruct` (7B params, 4GB VRAM/8GB RAM)
-- Speed: ⚡⚡⚡⚡⚡ Very Fast (2x faster)
-- Quality: ⭐⭐⭐ Good
-- Use case: Low-end hardware, quick responses
-
-**To upgrade LLM:**
-```env
-# Update .env
-TRANSFORMERS_MODEL=Qwen/Qwen2.5-32B-Instruct
+If you only have one GPU, also change:
 ```
-The new model will download automatically on first use. No re-ingestion needed!
-
-### 🏆 **Recommended Production Configurations**
-
-#### **Configuration 1: Balanced (Recommended)**
-```env
-EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
-RERANKER_MODEL=BAAI/bge-reranker-base
-TRANSFORMERS_MODEL=Qwen/Qwen2.5-14B-Instruct
+EMBEDDING_DEVICE=cpu
 ```
-- **Speed:** Fast
-- **Quality:** Very Good
-- **Hardware:** 16GB RAM minimum
-- **Best for:** Most production use cases
-
-#### **Configuration 2: Maximum Quality**
-```env
-EMBEDDING_MODEL=BAAI/bge-large-en-v1.5
-RERANKER_MODEL=BAAI/bge-reranker-v2-m3
-TRANSFORMERS_MODEL=Qwen/Qwen2.5-32B-Instruct
-```
-- **Speed:** Moderate
-- **Quality:** Excellent
-- **Hardware:** 32GB RAM minimum
-- **Best for:** Critical applications, research
-
-#### **Configuration 3: Fast & Efficient (Current)**
-```env
-EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
-RERANKER_MODEL=BAAI/bge-reranker-base
-TRANSFORMERS_MODEL=Qwen/Qwen2.5-14B-Instruct
-```
-- **Speed:** Very Fast
-- **Quality:** Good
-- **Hardware:** 16GB RAM minimum
-- **Best for:** Testing, development, rapid iteration
-
-#### **Configuration 4: Multilingual**
-```env
-EMBEDDING_MODEL=BAAI/bge-m3
-RERANKER_MODEL=BAAI/bge-reranker-v2-m3
-TRANSFORMERS_MODEL=Qwen/Qwen2.5-14B-Instruct
-```
-- **Speed:** Moderate
-- **Quality:** Excellent
-- **Hardware:** 16GB RAM minimum
-- **Best for:** Multi-language document collections
-
-### ⚡ **Performance Impact Summary**
-
-| Component | Affects | Re-ingestion Required? |
-|-----------|---------|------------------------|
-| Embedding Model | Ingestion speed, retrieval quality | ✅ Yes |
-| Reranker Model | Query speed (minimal), answer quality | ❌ No |
-| LLM Model | Response generation speed/quality | ❌ No |
-
-**Note:** Upgrading embedding model requires re-running `python rag/ingest.py` to rebuild the vector database with new embeddings.
 
 ---
 
-## 🌍 Multilingual Functionality Guide
+### `rag/.env` — controls how documents are processed
 
-The chatbot **automatically responds in the language you use** to ask questions (English, French, Spanish, etc.). However, **each model component affects multilingual quality differently**:
+Same `HF_CACHE_DIR` change, and optionally switch the device to `cpu` if needed:
 
-### How Each Component Affects Multilingual Support
-
-#### **1. Embedding Model - CRITICAL for Multilingual Retrieval** 🔴
-
-**Impact:** Determines if your question in ANY language can find relevant documents
-
-**Current Model:** `sentence-transformers/all-MiniLM-L6-v2`
-- ⚠️ **English-only optimized**
-- Non-English queries will retrieve less relevant documents
-- Works for English, poor for French/Spanish/other languages
-
-**Recommended for Multilingual:**
-```env
-EMBEDDING_MODEL=BAAI/bge-m3
-# or
-EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 ```
-
-**Why it matters:**
-- French question → English-focused embeddings → retrieves wrong documents → LLM gets irrelevant context → poor answer **even if LLM speaks French**
-- Multilingual embeddings → retrieves correct documents in any language → LLM gets relevant context → excellent answer
-
-**⚠️ Requires re-ingestion:** YES - `python rag/ingest.py`
+HF_CACHE_DIR=/home/yourname/.cache/huggingface
+HF_HOME=/home/yourname/.cache/huggingface
+EMBEDDING_DEVICE=cpu   # only if you have one GPU
+```
 
 ---
 
-#### **2. Reranker Model - Important for Multilingual Precision** 🟡
+## Step 4 — Copy your existing AI model files into Docker (optional, saves time)
 
-**Impact:** Refines which documents are most relevant to your question
+When Docker containers start for the first time, they download the AI helper models (about 2–3 GB total). If you already downloaded these models before (they would be in `~/.cache/huggingface`), you can copy them into Docker's storage so they don't download again:
 
-**Current Model:** `BAAI/bge-reranker-base`
-- ⚠️ **English-focused**
-- Can rerank, but less accurate for non-English queries
-
-**Recommended for Multilingual:**
-```env
-RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+```bash
+# Replace /home/yourname with your actual home folder path
+docker run --rm \
+  -v hf-cache:/dst \
+  -v /home/yourname/.cache/huggingface:/src:ro \
+  alpine sh -c "cp -r /src/. /dst/"
 ```
 
-**Why it matters:**
-- Even if embeddings retrieve 10 good multilingual documents, English-only reranker might rank them poorly
-- Multilingual reranker correctly identifies the most relevant chunks in any language
-
-**⚠️ Requires re-ingestion:** NO - just update `.env` and restart
+If you skip this step, the models will just download automatically when you first start the services.
 
 ---
 
-#### **3. LLM (Text Generation Model) - Determines Answer Language** 🟢
+## Step 5 — Add your documents
 
-**Impact:** Generates the actual response in the target language
+Put the files you want to ask questions about into the `docs/` folder.
 
-**Current Model:** `qwen2.5:14b-instruct`
-- ✅ **Excellent multilingual support** (100+ languages)
-- Strong in: English, Chinese, French, Spanish, German, Japanese, Korean, Arabic, and more
-- The prompt automatically instructs it to respond in the question's language
-
-**Alternative Multilingual LLMs:**
-```env
-# In .env file
-TRANSFORMERS_MODEL=Qwen/Qwen2.5-14B-Instruct    # Excellent for 100+ languages
-TRANSFORMERS_MODEL=Qwen/Qwen2.5-32B-Instruct    # Best multilingual quality
-# Other alternatives:
-# TRANSFORMERS_MODEL=meta-llama/Llama-3.1-8B-Instruct  # Good for European languages
-```
-
-**Why it matters:**
-- Even with perfect retrieval, if LLM doesn't support the language, answers will be poor or in wrong language
-- Qwen models are already excellent for multilingual - upgrading mainly improves reasoning depth
+**Supported file types:** PDF, Word (DOCX), PowerPoint (PPTX), plain text, Markdown, Excel, CSV, OpenDocument (ODT), and ZIP archives (which are extracted automatically).
 
 ---
 
-### Current System Multilingual Capability
+## Step 6 — Process your documents
 
-| Component | Current Model | Multilingual? | Impact on Non-English |
-|-----------|---------------|---------------|------------------------|
-| **Embedding** | all-MiniLM-L6-v2 | ❌ English-only | 🔴 **Poor retrieval** for non-English questions |
-| **Reranker** | bge-reranker-base | ⚠️ English-focused | 🟡 **Suboptimal ranking** for non-English |
-| **LLM** | Qwen2.5-14B-Instruct | ✅ Excellent | ✅ **Perfect responses** in any language |
+This step reads all your documents, breaks them into small pieces, and builds a searchable index. You only need to do this once, or again when you add new documents.
 
-**Result:** The LLM **CAN respond** in French/Spanish/etc., but will work with **lower-quality context** retrieved by English-only embeddings.
+```bash
+docker compose run --rm ingest
+```
+
+The first time this runs it will download the search helper model (~2 GB). You will see progress messages for each document. When it finishes, it will show a summary of how many documents were processed.
 
 ---
 
-### Upgrading to Full Multilingual Support
+## Step 7 — Start the AI model
 
-**Recommended Configuration:**
+The AI model needs to be started separately. Open a terminal, activate the Python environment, and run:
 
-```env
-# In .env file
-EMBEDDING_MODEL=BAAI/bge-m3
-RERANKER_MODEL=BAAI/bge-reranker-v2-m3
-TRANSFORMERS_MODEL=Qwen/Qwen2.5-14B-Instruct
+```bash
+source .venv/bin/activate
+
+# If you have two GPUs, this uses the second one (GPU index 1)
+# If you only have one GPU, remove "CUDA_VISIBLE_DEVICES=1"
+CUDA_VISIBLE_DEVICES=1 python -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen3-14B-AWQ \
+  --port 8000 \
+  --quantization awq \
+  --dtype float16 \
+  --gpu-memory-utilization 0.90 \
+  --max-model-len 8192 \
+  --trust-remote-code
 ```
 
-**Steps:**
-1. Update `.env` with multilingual models
-2. Re-ingest documents: `python rag/ingest.py` (required for embedding change)
-3. Restart frontend/queries
+The first time this runs, it downloads the Qwen model (~8 GB). This can take a while depending on your internet speed.
 
-**Benefits:**
-- ✅ Excellent retrieval for questions in **any language**
-- ✅ Accurate reranking regardless of language
-- ✅ High-quality answers in **100+ languages**
+**Wait until you see this message before continuing:**
+```
+Application startup complete.
+```
 
-**Trade-offs:**
-- Slightly slower (BGE-m3 is ~2x slower than all-MiniLM-L6-v2)
-- Larger model downloads (~3GB vs 90MB)
+Keep this terminal open — the model stops if you close it.
 
 ---
 
-### Testing Multilingual Functionality
+## Step 8 — Start the three helper services
 
-```powershell
-# English
-python rag/query.py "What are the latest V-PCC compression results?"
+Open a **new terminal** (keep the one from Step 7 running) and run:
 
-# French
-python rag/query.py "Quels sont les derniers résultats de compression V-PCC ?"
-
-# Spanish
-python rag/query.py "¿Cuáles son los últimos resultados de compresión V-PCC?"
+```bash
+docker compose up
 ```
 
-**Expected behavior:**
-- ✅ LLM responds in the correct language (works with current setup)
-- ⚠️ Answer quality may be lower for non-English with current English-only embeddings
-- ✅ Full quality in all languages after upgrading to multilingual embeddings
+The first time, Docker needs to build the images — this takes a few minutes. After that it will be fast.
+
+You will see log messages from three services starting up. Wait until all three show something like `Application startup complete`.
+
+Keep this terminal open too.
 
 ---
 
-## Chunking Configuration Guide
+## Step 9 — Open the chat interface
 
-### What is Chunking?
+Open a **third terminal** and run:
 
-Chunking splits large documents into smaller pieces for better retrieval and processing. **Chunk settings significantly impact answer quality!**
-
-### Current Default Settings:
-```env
-CHUNK_SIZE=800          # ~150-200 words, 2-3 paragraphs
-CHUNK_OVERLAP=100       # 12.5% overlap between chunks
+```bash
+source .venv/bin/activate
+python frontend/app.py
 ```
 
-### How Chunk Size Affects Quality:
+Then open your browser and go to:
 
-| Chunk Size | Best For | Pros | Cons |
-|------------|----------|------|------|
-| **300-600** | FAQs, snippets, Q&A | Precise retrieval, fast | May fragment ideas |
-| **800-1000** | General technical docs | Balanced context/precision | Good all-around |
-| **1200-1500** | Dense specs, standards | Complete explanations | Slower retrieval |
-| **1500-2000** | Research papers, articles | Preserves narrative | May dilute relevance |
+**http://localhost:8080**
 
-### Why Overlap Matters:
+You can now type questions about your documents and get answers.
 
-**Without overlap (0):**
+---
+
+## Starting again after a reboot
+
+After restarting your computer, do these steps each time:
+
+**Terminal 1 — start the AI model:**
+```bash
+cd LLMQwen
+source .venv/bin/activate
+CUDA_VISIBLE_DEVICES=1 python -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen3-14B-AWQ \
+  --port 8000 --quantization awq --dtype float16 \
+  --gpu-memory-utilization 0.90 --max-model-len 8192 --trust-remote-code
 ```
-Chunk 1: "...the solution requires three steps. First,"
-Chunk 2: "Second, process the data. Third, validate..."
+
+**Terminal 2 — start the helper services:**
+```bash
+cd LLMQwen
+docker compose up
 ```
-❌ Retrieving Chunk 2 misses "First" step!
 
-**With overlap (10-20%):**
+**Terminal 3 — start the website:**
+```bash
+cd LLMQwen
+source .venv/bin/activate
+python frontend/app.py
 ```
-Chunk 1: "...the solution requires three steps. First, initialize."
-Chunk 2: "...three steps. First, initialize. Second, process..."
+
+Then open **http://localhost:8080**.
+
+---
+
+## Alternative: start everything with one command
+
+Instead of the three terminals above, you can use `serve.sh` which opens everything at once in a tmux session (a tool that manages multiple terminal panels):
+
+```bash
+# Install tmux if you don't have it
+sudo apt install tmux
+
+# Start everything
+bash serve.sh
 ```
-✅ Important information appears in multiple chunks!
 
-### Recommended Settings by Document Type:
+To see what's running, type `tmux attach -t rag`. Use `Ctrl-b` then a number (0–4) to switch between panels.
 
-#### **Dense Technical Specifications** (MPEG, ISO, IEEE standards)
-```env
-CHUNK_SIZE=1200
-CHUNK_OVERLAP=200
-```
-- **Why:** Technical specs need complete multi-paragraph explanations
-- **Example:** Algorithm descriptions, performance tables, conformance requirements
-- **Impact:** Better context for complex technical questions
+---
 
-#### **Short FAQs / Knowledge Base**
-```env
-CHUNK_SIZE=500
-CHUNK_OVERLAP=75
-```
-- **Why:** Quick, focused answers without excess context
-- **Example:** Troubleshooting guides, quick reference docs
-- **Impact:** Faster, more precise retrieval
+## Adding new documents
 
-#### **Long-Form Articles / Research Papers**
-```env
-CHUNK_SIZE=1500
-CHUNK_OVERLAP=300
-```
-- **Why:** Preserves argument flow and narrative structure
-- **Example:** White papers, academic articles, detailed reports
-- **Impact:** Maintains logical connections between ideas
+1. Copy the new files into `docs/`
+2. Re-process them:
+   ```bash
+   docker compose run --rm ingest
+   ```
+3. That's it — the search service picks up the updated index automatically
 
-#### **Mixed Document Collection** (Recommended)
-```env
-CHUNK_SIZE=1000
-CHUNK_OVERLAP=150
-```
-- **Why:** Good balance for varied content types
-- **Example:** Mix of specs, guides, and reports
-- **Impact:** Versatile performance across document types
+---
 
-### How to Adjust Chunking:
+## Changing the AI model
 
-1. **Edit `.env` file:**
-   ```env
-   CHUNK_SIZE=1200
-   CHUNK_OVERLAP=200
+1. Stop the AI model (press `Ctrl-C` in terminal 1)
+2. Change `VLLM_MODEL` in `services/llm/.env` to the new model name
+3. Start the AI model again (Step 7) with the new model name in the command
+4. Restart just the LLM service:
+   ```bash
+   docker compose restart llm
    ```
 
-2. **Re-ingest your documents:**
-   ```powershell
-   python rag/ingest.py
-   ```
-
-3. **Test with same questions** to compare quality
-
-### Chunk Size Impact on Your System:
-
-| Setting | Total Chunks | Retrieval Speed | Context Quality |
-|---------|--------------|-----------------|------------------|
-| 500/75 | ~45,000 | Fastest | Fragmented |
-| 800/100 | ~29,000 | Fast | Good |
-| 1000/150 | ~23,000 | Medium | Better |
-| 1500/300 | ~15,000 | Slower | Most Complete |
-
-**Rule of Thumb:** Overlap should be 10-20% of chunk size for optimal results.
+No need to re-process your documents.
 
 ---
+
+## Changing search quality settings
+
+These settings are in `services/search/.env` and take effect after restarting the search service (`docker compose restart search`):
+
+| Setting | What it does | Default |
+|---|---|---|
+| `RETRIEVAL_CHUNKS` | How many document pieces to consider before filtering | `50` |
+| `USE_HYDE` | Generate a fake answer first to improve search accuracy. Slower but better for vague questions. | `false` |
+
+---
+
+## Changing answer quality settings
+
+These settings are in `services/llm/.env` and take effect after restarting (`docker compose restart llm`):
+
+| Setting | What it does | Default |
+|---|---|---|
+| `TEMPERATURE` | How creative the answers are. `0` = very precise, `1` = very creative | `0.1` |
+| `MAX_NEW_TOKENS` | Maximum length of the answer in word-pieces | `1024` |
+| `TOP_P` | Cuts off unlikely word choices. `1.0` = no cut-off | `0.95` |
+| `FREQUENCY_PENALTY` | Reduces repetition. `0` = none, higher = less repetition | `0.0` |
+
+---
+
+## Uploading images to Docker Hub (for sharing)
+
+If you want to share your setup with someone else so they can pull your ready-made images instead of building from scratch:
+
+```bash
+# Log in to Docker Hub
+docker login
+
+# Build and upload the three services
+docker compose build
+docker compose push llm reranker search
+
+# Build and upload the ingestion tool
+docker compose --profile ingest build ingest
+docker compose --profile ingest push ingest
+```
+
+On the other machine, instead of running `docker compose build`, they just run:
+```bash
+docker compose pull
+docker compose --profile ingest pull ingest
+```
+
+---
+
+## Something is not working
+
+**The chat page won't load**
+Make sure all three terminals are still running (Steps 7, 8, 9). If any crashed, restart that step.
+
+**"No vector store" error**
+You skipped or the document processing failed. Re-run:
+```bash
+docker compose run --rm ingest
+```
+
+**The AI gives no answer or times out**
+The AI model (Step 7) may have crashed or not finished loading. Check terminal 1 — it should say `Application startup complete`. If it crashed, restart it.
+
+**Out of GPU memory error**
+Your GPU doesn't have enough memory. Try these fixes in order:
+1. In `services/reranker/.env`, change `RERANKER_DEVICE=cuda:0` to `RERANKER_DEVICE=cpu`
+2. In `services/search/.env`, change `EMBEDDING_DEVICE=cuda:0` to `EMBEDDING_DEVICE=cpu`
+3. After changing, run `docker compose restart reranker search`
+
+**Check if the services are running correctly**
+These commands should each return `{"status":"ok"}`:
+```bash
+curl http://localhost:8010/health
+curl http://localhost:8011/health
+curl http://localhost:8012/health
+```

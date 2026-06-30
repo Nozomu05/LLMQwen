@@ -66,17 +66,18 @@ def _get_embeddings():
     from langchain_community.embeddings import FastEmbedEmbeddings
     from langchain_huggingface import HuggingFaceEmbeddings
 
-    provider = os.getenv("EMBEDDING_PROVIDER_ML", "fastembed").lower()
-    model = os.getenv("EMBEDDING_MODEL_ML", "intfloat/multilingual-e5-large")
+    provider = os.environ["EMBEDDING_PROVIDER_ML"].lower()
+    model = os.environ["EMBEDDING_MODEL_ML"]
     key = (provider, model)
     if key in _EMBEDDINGS_CACHE:
         return _EMBEDDINGS_CACHE[key]
 
+    normalize = os.environ["EMBEDDING_NORMALIZE"].lower() == "true"
     if provider == "huggingface":
         emb = HuggingFaceEmbeddings(
             model_name=model,
-            model_kwargs={"device": os.getenv("EMBEDDING_DEVICE", "cpu")},
-            encode_kwargs={"normalize_embeddings": True},
+            model_kwargs={"device": os.environ["EMBEDDING_DEVICE"]},
+            encode_kwargs={"normalize_embeddings": normalize},
         )
     else:
         emb = FastEmbedEmbeddings(
@@ -115,7 +116,7 @@ def _translate_to_english(text: str) -> str:
 def _get_vectorstore():
     from langchain_chroma import Chroma
 
-    chroma_dir = Path(os.getenv("CHROMA_DIR", "storage/chroma")).resolve()
+    chroma_dir = Path(os.environ["CHROMA_DIR"]).resolve()
     if not chroma_dir.exists():
         raise FileNotFoundError(
             f"No vector store at {chroma_dir}. Run ingestion first: python rag/ingest.py"
@@ -131,11 +132,11 @@ def _get_vectorstore():
 
 def _vector_search(retrieval_query: str) -> list[dict]:
     """Embed the retrieval query and search the Chroma index."""
-    k_total = int(os.getenv("RETRIEVAL_CHUNKS", "300"))
+    k_total = int(os.environ["RETRIEVAL_CHUNKS"])
     vs = _get_vectorstore()
 
     # Instruct-style models need a prefix on the query side
-    embedding_model = os.getenv("EMBEDDING_MODEL_ML", "")
+    embedding_model = os.environ["EMBEDDING_MODEL_ML"]
     if "instruct" in embedding_model.lower():
         retrieval_query = (
             f"Instruct: Retrieve relevant passages that answer the question\n"
@@ -176,13 +177,13 @@ def query(req: QueryRequest):
     """Full RAG entry point: search → rerank → generate."""
     t_start = time.time()
 
-    reranker_url = os.getenv("RERANKER_SERVICE_URL", "http://localhost:8011")
-    llm_url = os.getenv("LLM_SERVICE_URL", "http://localhost:8012")
+    reranker_url = os.environ["RERANKER_SERVICE_URL"]
+    llm_url = os.environ["LLM_SERVICE_URL"]
 
     lang_code, lang_hint = _detect_language(req.query)
 
     # Determine the retrieval query and the reranking query
-    if os.getenv("USE_HYDE", "false").lower() == "true":
+    if os.environ["USE_HYDE"].lower() == "true":
         # HyDE: generate a hypothetical answer to use as the retrieval query.
         # The hypothesis is also used as the rerank query (matches original behaviour).
         try:
