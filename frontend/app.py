@@ -4,14 +4,12 @@ import os
 import re
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from io import BytesIO
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 
 FRONTEND_DIR = Path(__file__).parent
-MAX_TEXT_CHARS = 20_000
 
 _SEARCH_SERVICE_URL = os.getenv("SEARCH_SERVICE_URL", "http://localhost:8010")
 
@@ -61,44 +59,15 @@ def get_vllm_queue_stats() -> dict:
 
 
 def extract_text_from_bytes(filename: str, file_bytes: bytes) -> str:
-    ext = Path(filename).suffix.lower()
-    try:
-        if ext == ".pdf":
-            import fitz
-            doc = fitz.open(stream=file_bytes, filetype="pdf")
-            text = "\n".join(page.get_text() for page in doc)
-        elif ext == ".docx":
-            from docx import Document as DocxDoc
-            doc = DocxDoc(BytesIO(file_bytes))
-            text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-        elif ext == ".pptx":
-            from pptx import Presentation
-            prs = Presentation(BytesIO(file_bytes))
-            parts = []
-            for slide in prs.slides:
-                for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text.strip():
-                        parts.append(shape.text)
-            text = "\n".join(parts)
-        elif ext in (".xlsx", ".xls", ".ods"):
-            import openpyxl
-            wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
-            rows = []
-            for ws in wb.worksheets:
-                rows.append(f"[Sheet: {ws.title}]")
-                for row in ws.iter_rows(values_only=True):
-                    row_str = "\t".join(str(c) if c is not None else "" for c in row)
-                    if row_str.strip():
-                        rows.append(row_str)
-            text = "\n".join(rows)
-        else:
-            text = file_bytes.decode("utf-8", errors="replace")
-    except Exception as e:
-        text = f"[Error extracting text from {filename}: {e}]"
-
-    if len(text) > MAX_TEXT_CHARS:
-        text = text[:MAX_TEXT_CHARS] + f"\n\n[... truncated at {MAX_TEXT_CHARS:,} characters]"
-    return text
+    """Delegate extraction to the search service's /extract endpoint, which owns
+    the PDF/DOCX/PPTX/XLSX parsing logic (and its truncation limit)."""
+    resp = requests.post(
+        f"{_SEARCH_SERVICE_URL}/extract",
+        files={"file": (filename, file_bytes)},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json()["text"]
 
 
 class Handler(BaseHTTPRequestHandler):

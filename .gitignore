@@ -40,9 +40,10 @@ wheels/
 Thumbs.db
 
 # Project specific
- 
+
 storage/.ingest_cache.json
 ingestion_errors.log
+tempdocs/
 
 # Office temporary files
 ~$*

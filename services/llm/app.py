@@ -25,6 +25,7 @@ load_dotenv(override=True)
 app = FastAPI(title="LLM Service")
 
 _LLM_CACHE: dict = {}
+_TOKENIZER_CACHE: dict = {}
 
 _RAG_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """You are a precise technical expert in video compression, 3D content coding, and international standards (MPEG, ISO/IEC). Answer strictly from the provided context.
@@ -116,17 +117,42 @@ def _format_chunks(chunks: list[Chunk]) -> str:
     )
 
 
-def _truncate_context(context_text: str, max_new_tokens: int, max_context_length: int) -> str:
-    overhead_tokens = int(os.environ["PROMPT_OVERHEAD_TOKENS"])
-    available_tokens = max_context_length - max_new_tokens - overhead_tokens
+def _get_tokenizer():
+    model_name = os.environ["VLLM_MODEL"]
+    if model_name not in _TOKENIZER_CACHE:
+        from transformers import AutoTokenizer
+        _TOKENIZER_CACHE[model_name] = AutoTokenizer.from_pretrained(model_name)
+    return _TOKENIZER_CACHE[model_name]
+
+
+def _count_tokens(text: str) -> int:
+    return len(_get_tokenizer().encode(text, add_special_tokens=False))
+
+
+def _truncate_context(context_text: str, question: str, max_new_tokens: int, max_context_length: int) -> str:
+    """Truncate context_text so the full prompt fits the model's context window.
+
+    Uses the real tokenizer instead of a chars-per-token estimate — with
+    document uploads pushing prompts close to the limit, an approximate
+    ratio can undercount and the request gets rejected by vLLM entirely.
+    """
+    # Small safety margin for chat-template special tokens (role markers, etc.)
+    template_overhead_tokens = int(os.environ["PROMPT_OVERHEAD_TOKENS"])
+    system_tokens = _count_tokens(_RAG_PROMPT.messages[0].prompt.template)
+    fixed_tokens = system_tokens + _count_tokens(question) + template_overhead_tokens
+
+    available_tokens = max_context_length - max_new_tokens - fixed_tokens
     if available_tokens <= 0:
-        available_tokens = 1000
-    max_chars = available_tokens * 4
-    if len(context_text) <= max_chars:
+        available_tokens = 500
+
+    tokenizer = _get_tokenizer()
+    context_token_ids = tokenizer.encode(context_text, add_special_tokens=False)
+    if len(context_token_ids) <= available_tokens:
         return context_text
-    truncated = context_text[:max_chars]
+
+    truncated = tokenizer.decode(context_token_ids[:available_tokens])
     last_para = truncated.rfind("\n\n")
-    if last_para > max_chars * 0.8:
+    if last_para > len(truncated) * 0.8:
         truncated = truncated[:last_para]
     return truncated
 
@@ -235,7 +261,7 @@ def generate(req: GenerateRequest):
         uploaded_names = [d["filename"] for d in req.extra_docs]
         sources = uploaded_names + [s for s in sources if s not in uploaded_names]
 
-    context_text = _truncate_context(context_text, max_new_tokens, max_context_length)
+    context_text = _truncate_context(context_text, req.query + req.lang_hint, max_new_tokens, max_context_length)
     header = _build_answer_header(req.query, req.chunks)
     chain = _RAG_PROMPT | llm
 
@@ -247,42 +273,47 @@ def generate(req: GenerateRequest):
         in_think = False
         think_buf = ""
 
-        for chunk in chain.stream({"question": req.query + req.lang_hint, "context": context_text}):
-            text = chunk.content
-            text = re.sub(r"\[m\d+\]|\[\d+\]|\[[A-Za-z][A-Za-z0-9]{1,}\]", "", text)
-            if re.search(r"[^\s''']{18,}", text):
-                break
+        try:
+            for chunk in chain.stream({"question": req.query + req.lang_hint, "context": context_text}):
+                text = chunk.content
+                text = re.sub(r"\[m\d+\]|\[\d+\]|\[[A-Za-z][A-Za-z0-9]{1,}\]", "", text)
+                if re.search(r"[^\s''']{18,}", text):
+                    break
 
-            # Strip <think>...</think> blocks that Qwen3 emits (empty with /no_think)
-            if in_think:
-                think_buf += text
-                if "</think>" in think_buf:
-                    text = think_buf.split("</think>", 1)[1]
-                    think_buf = ""
-                    in_think = False
-                else:
-                    accumulated += text
+                # Strip <think>...</think> blocks that Qwen3 emits (empty with /no_think)
+                if in_think:
+                    think_buf += text
+                    if "</think>" in think_buf:
+                        text = think_buf.split("</think>", 1)[1]
+                        think_buf = ""
+                        in_think = False
+                    else:
+                        accumulated += text
+                        continue
+                if "<think>" in text:
+                    before, _, rest = text.partition("<think>")
+                    if "</think>" in rest:
+                        text = before + rest.split("</think>", 1)[1]
+                    else:
+                        in_think = True
+                        think_buf = rest
+                        text = before
+                if not text:
                     continue
-            if "<think>" in text:
-                before, _, rest = text.partition("<think>")
-                if "</think>" in rest:
-                    text = before + rest.split("</think>", 1)[1]
-                else:
-                    in_think = True
-                    think_buf = rest
-                    text = before
-            if not text:
-                continue
 
-            accumulated += text
-            yield f"data: {json.dumps({'type': 'chunk', 'text': text})}\n\n"
-            if any(p in accumulated for p in _STOP_PATTERNS):
-                break
-            if accumulated.count("\n---") >= 2:
-                break
-            summary_pos = next((accumulated.find(m) for m in _SUMMARY_MARKERS if m in accumulated), -1)
-            if summary_pos >= 0 and accumulated[summary_pos + 12:].find("\n\n") >= 50:
-                break
+                accumulated += text
+                yield f"data: {json.dumps({'type': 'chunk', 'text': text})}\n\n"
+                if any(p in accumulated for p in _STOP_PATTERNS):
+                    break
+                if accumulated.count("\n---") >= 2:
+                    break
+                summary_pos = next((accumulated.find(m) for m in _SUMMARY_MARKERS if m in accumulated), -1)
+                if summary_pos >= 0 and accumulated[summary_pos + 12:].find("\n\n") >= 50:
+                    break
+        except Exception as exc:
+            print(f"[llm] generation failed after {time.time() - t_start:.2f}s: {exc}")
+            yield f"data: {json.dumps({'type': 'error', 'error': f'LLM generation error: {exc}'})}\n\n"
+            return
 
         print(f"[llm] generation: {time.time() - t_start:.2f}s — {len(accumulated.split())} words")
         yield f"data: {json.dumps({'type': 'done'})}\n\n"

@@ -16,12 +16,7 @@ cd "$SCRIPT_DIR"
 
 source .venv/bin/activate
 
-# Load project env vars
-set -o allexport
-source .env
-set +o allexport
-
-MODEL="${VLLM_MODEL:-Qwen/Qwen2.5-14B-Instruct-AWQ}"
+MODEL="${VLLM_MODEL:-Qwen/Qwen3-14B-AWQ}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 GPU="${VLLM_GPU:-1}"
 MAX_SEQS="${VLLM_MAX_SEQS:-15}"
@@ -44,7 +39,6 @@ tmux new-session -d -s "$SESSION" -n "vllm"
 tmux send-keys -t "$SESSION:vllm" "
 cd '$SCRIPT_DIR'
 source .venv/bin/activate
-set -o allexport; source .env; set +o allexport
 echo '=== vLLM server (GPU $GPU - RTX 5090, port $VLLM_PORT) ==='
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES='$GPU' \\
 python -m vllm.entrypoints.openai.api_server \\
@@ -53,7 +47,7 @@ python -m vllm.entrypoints.openai.api_server \\
     --tensor-parallel-size 1 \\
     --quantization awq \\
     --dtype float16 \\
-    --gpu-memory-utilization 0.90 \\
+    --gpu-memory-utilization 0.75 \\
     --max-model-len 8192 \\
     --max-num-seqs $MAX_SEQS \\
     --served-model-name '$MODEL' \\
@@ -68,7 +62,7 @@ tmux new-window -t "$SESSION" -n "llm-svc"
 tmux send-keys -t "$SESSION:llm-svc" "
 cd '$SCRIPT_DIR'
 source .venv/bin/activate
-set -o allexport; source .env; set +o allexport
+set -o allexport; source services/llm/.env; set +o allexport
 echo '=== LLM service (port $LLM_SVC_PORT) ==='
 uvicorn services.llm.app:app --host 0.0.0.0 --port $LLM_SVC_PORT
 " Enter
@@ -78,7 +72,7 @@ tmux new-window -t "$SESSION" -n "reranker-svc"
 tmux send-keys -t "$SESSION:reranker-svc" "
 cd '$SCRIPT_DIR'
 source .venv/bin/activate
-set -o allexport; source .env; set +o allexport
+set -o allexport; source services/reranker/.env; set +o allexport
 echo '=== Reranker service (GPU 0 - RTX 2080 Ti, port $RERANKER_SVC_PORT) ==='
 CUDA_DEVICE_ORDER=PCI_BUS_ID \\
 uvicorn services.reranker.app:app --host 0.0.0.0 --port $RERANKER_SVC_PORT
@@ -89,7 +83,7 @@ tmux new-window -t "$SESSION" -n "search-svc"
 tmux send-keys -t "$SESSION:search-svc" "
 cd '$SCRIPT_DIR'
 source .venv/bin/activate
-set -o allexport; source .env; set +o allexport
+set -o allexport; source services/search/.env; set +o allexport
 echo '=== Search service (GPU 0 - RTX 2080 Ti, port $SEARCH_SVC_PORT) ==='
 CUDA_DEVICE_ORDER=PCI_BUS_ID \\
 uvicorn services.search.app:app --host 0.0.0.0 --port $SEARCH_SVC_PORT
@@ -100,8 +94,11 @@ tmux new-window -t "$SESSION" -n "frontend"
 tmux send-keys -t "$SESSION:frontend" "
 cd '$SCRIPT_DIR'
 source .venv/bin/activate
-set -o allexport; source .env; set +o allexport
 echo '=== Frontend (port $FRONTEND_PORT) ==='
+LLM_BACKEND=vllm \\
+VLLM_BASE_URL=http://localhost:$VLLM_PORT \\
+MAX_QUEUE_SIZE=$MAX_SEQS \\
+SEARCH_SERVICE_URL=http://localhost:$SEARCH_SVC_PORT \\
 python frontend/app.py
 " Enter
 

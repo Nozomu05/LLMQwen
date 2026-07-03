@@ -8,12 +8,14 @@ Returns:  {"answer", "model", "sources"}
 import os
 import time
 import warnings
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -27,8 +29,17 @@ load_dotenv(override=True)
 
 app = FastAPI(title="Search Service")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 _EMBEDDINGS_CACHE: dict = {}
 _VECTORSTORE_CACHE: dict = {}
+
+MAX_EXTRACT_CHARS = 20_000
 
 _LANG_INSTRUCTIONS = {
     "fr": "Réponds en français.",
@@ -130,6 +141,48 @@ def _get_vectorstore():
     return _VECTORSTORE_CACHE[vs_key]
 
 
+def _extract_text_from_bytes(filename: str, file_bytes: bytes) -> str:
+    """Convert an uploaded office/PDF file to plain text for use as a query document."""
+    ext = Path(filename).suffix.lower()
+    try:
+        if ext == ".pdf":
+            import fitz
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            text = "\n".join(page.get_text() for page in doc)
+        elif ext == ".docx":
+            from docx import Document as DocxDoc
+            doc = DocxDoc(BytesIO(file_bytes))
+            text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        elif ext == ".pptx":
+            from pptx import Presentation
+            prs = Presentation(BytesIO(file_bytes))
+            parts = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        parts.append(shape.text)
+            text = "\n".join(parts)
+        elif ext in (".xlsx", ".xls", ".ods"):
+            import openpyxl
+            wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+            rows = []
+            for ws in wb.worksheets:
+                rows.append(f"[Sheet: {ws.title}]")
+                for row in ws.iter_rows(values_only=True):
+                    row_str = "\t".join(str(c) if c is not None else "" for c in row)
+                    if row_str.strip():
+                        rows.append(row_str)
+            text = "\n".join(rows)
+        else:
+            text = file_bytes.decode("utf-8", errors="replace")
+    except Exception as e:
+        text = f"[Error extracting text from {filename}: {e}]"
+
+    if len(text) > MAX_EXTRACT_CHARS:
+        text = text[:MAX_EXTRACT_CHARS] + f"\n\n[... truncated at {MAX_EXTRACT_CHARS:,} characters]"
+    return text
+
+
 def _vector_search(retrieval_query: str) -> list[dict]:
     """Embed the retrieval query and search the Chroma index."""
     k_total = int(os.environ["RETRIEVAL_CHUNKS"])
@@ -170,6 +223,14 @@ def warmup():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/extract")
+async def extract(file: UploadFile = File(...)):
+    """Extract plain text from an uploaded PDF/DOCX/PPTX/XLSX file for use as a query document."""
+    file_bytes = await file.read()
+    text = _extract_text_from_bytes(file.filename or "document", file_bytes)
+    return {"filename": file.filename, "text": text}
 
 
 @app.post("/query")
