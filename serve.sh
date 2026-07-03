@@ -4,7 +4,6 @@
 #   2. LLM service       (CPU,                port 8012)
 #   3. Reranker service  (GPU 0 - RTX 2080Ti, port 8011)
 #   4. Search service    (GPU 0 - RTX 2080Ti, port 8010)
-#   5. Frontend          (CPU,                port 8080)
 #
 # Each process runs in its own tmux pane so you can monitor logs separately.
 # Requires tmux. Run with:
@@ -24,7 +23,6 @@ MAX_SEQS="${VLLM_MAX_SEQS:-15}"
 LLM_SVC_PORT="${LLM_SERVICE_PORT:-8012}"
 RERANKER_SVC_PORT="${RERANKER_SERVICE_PORT:-8011}"
 SEARCH_SVC_PORT="${SEARCH_SERVICE_PORT:-8010}"
-FRONTEND_PORT="${FRONTEND_PORT:-8080}"
 
 SESSION="rag"
 
@@ -89,27 +87,13 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID \\
 uvicorn services.search.app:app --host 0.0.0.0 --port $SEARCH_SVC_PORT
 " Enter
 
-# ── Window 4: Frontend ───────────────────────────────────────────────────
-tmux new-window -t "$SESSION" -n "frontend"
-tmux send-keys -t "$SESSION:frontend" "
-cd '$SCRIPT_DIR'
-source .venv/bin/activate
-echo '=== Frontend (port $FRONTEND_PORT) ==='
-LLM_BACKEND=vllm \\
-VLLM_BASE_URL=http://localhost:$VLLM_PORT \\
-MAX_QUEUE_SIZE=$MAX_SEQS \\
-SEARCH_SERVICE_URL=http://localhost:$SEARCH_SVC_PORT \\
-python frontend/app.py
-" Enter
-
 echo "All services starting in tmux session '$SESSION'."
 echo ""
 echo "Attach with:  tmux attach -t $SESSION"
-echo "Switch panes: Ctrl-b then 0=vllm  1=llm-svc  2=reranker-svc  3=search-svc  4=frontend"
+echo "Switch panes: Ctrl-b then 0=vllm  1=llm-svc  2=reranker-svc  3=search-svc"
 echo ""
 echo "Service URLs:"
 echo "  vLLM server      : http://localhost:$VLLM_PORT"
 echo "  LLM service      : http://localhost:$LLM_SVC_PORT"
 echo "  Reranker service : http://localhost:$RERANKER_SVC_PORT"
 echo "  Search service   : http://localhost:$SEARCH_SVC_PORT"
-echo "  Frontend         : http://localhost:$FRONTEND_PORT  ← open this in browser"

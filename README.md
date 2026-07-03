@@ -125,7 +125,7 @@ python3 -m venv .venv
 # Activate it — you must do this every time you open a new terminal
 source .venv/bin/activate
 
-# Install vLLM and the frontend dependencies
+# Install vLLM and its dependencies
 pip install vllm
 pip install -r requirements.txt
 ```
@@ -289,20 +289,17 @@ Keep this terminal open too.
 
 ---
 
-## Step 9 — Open the chat interface
+## Step 9 — Query the API
 
-Open a **third terminal** and run:
+Once Steps 7 and 8 are running, ask a question directly against the search service:
 
 ```bash
-source .venv/bin/activate
-python frontend/app.py
+curl -N -X POST http://localhost:8010/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "your question here"}'
 ```
 
-Then open your browser and go to:
-
-**http://localhost:8080**
-
-You can now type questions about your documents and get answers.
+The response streams back as Server-Sent Events (SSE).
 
 ---
 
@@ -326,14 +323,7 @@ cd LLMQwen
 docker compose up
 ```
 
-**Terminal 3 — start the website:**
-```bash
-cd LLMQwen
-source .venv/bin/activate
-python frontend/app.py
-```
-
-Then open **http://localhost:8080**.
+Then query the API as shown in Step 9.
 
 ---
 
@@ -349,7 +339,7 @@ sudo apt install tmux
 bash serve.sh
 ```
 
-To see what's running, type `tmux attach -t rag`. Use `Ctrl-b` then a number (0–4) to switch between panels.
+To see what's running, type `tmux attach -t rag`. Use `Ctrl-b` then a number (0–3) to switch between panels.
 
 ---
 
@@ -428,9 +418,6 @@ docker compose --profile ingest pull ingest
 ---
 
 ## Something is not working
-
-**The chat page won't load**
-Make sure all three terminals are still running (Steps 7, 8, 9). If any crashed, restart that step.
 
 **"No vector store" error**
 You skipped or the document processing failed. Re-run:
