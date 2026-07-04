@@ -1,6 +1,6 @@
 """Reranker Service — CrossEncoder scoring, then forwards to LLM service.
 
-Receives: POST /rerank  {"query", "chunks", "rerank_query", "lang_hint", "extra_docs"}
+Receives: POST /rerank  {"query", "chunks", "rerank_query", "lang_hint", "extra_docs", "temperature"}
 Returns:  {"answer", "model", "sources"}  (passed through from LLM service)
 """
 import os
@@ -36,6 +36,7 @@ class RerankRequest(BaseModel):
     rerank_query: str = ""   # query used for scoring; falls back to query if empty
     lang_hint: str = ""
     extra_docs: Optional[list[dict]] = None
+    temperature: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +102,13 @@ def rerank(req: RerankRequest):
         try:
             with requests.post(
                 f"{llm_url}/generate",
-                json={"query": req.query, "chunks": chunks_payload, "lang_hint": req.lang_hint, "extra_docs": req.extra_docs},
+                json={
+                    "query": req.query,
+                    "chunks": chunks_payload,
+                    "lang_hint": req.lang_hint,
+                    "extra_docs": req.extra_docs,
+                    "temperature": req.temperature,
+                },
                 stream=True,
                 timeout=120,
             ) as resp:

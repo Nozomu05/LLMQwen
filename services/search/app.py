@@ -1,6 +1,6 @@
 """Search Service — entry point for the RAG pipeline.
 
-Receives: POST /query  {"query", "documents"}
+Receives: POST /query  {"query", "documents", "temperature"}
 Flow:     language detection → translation → embedding → Chroma vector search
           → POST /rerank (Reranker Service) → POST /generate (LLM Service)
 Returns:  {"answer", "model", "sources"}
@@ -67,6 +67,7 @@ class Document(BaseModel):
 class QueryRequest(BaseModel):
     query: str
     documents: Optional[list[Document]] = None
+    temperature: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +286,7 @@ def query(req: QueryRequest):
         "rerank_query": rerank_query,
         "lang_hint": lang_hint,
         "extra_docs": extra_docs,
+        "temperature": req.temperature,
     }
 
     def proxy_stream():

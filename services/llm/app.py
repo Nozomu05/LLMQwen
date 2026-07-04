@@ -1,6 +1,6 @@
 """LLM Service — prompt assembly and answer generation via vLLM.
 
-Receives: POST /generate  {"query", "chunks", "lang_hint", "extra_docs"}
+Receives: POST /generate  {"query", "chunks", "lang_hint", "extra_docs", "temperature"}
 Returns:  {"answer", "model", "sources"}
 
 Receives: POST /hyde      {"query"}
@@ -72,6 +72,7 @@ class GenerateRequest(BaseModel):
     chunks: list[Chunk]
     lang_hint: str = ""
     extra_docs: Optional[list[dict]] = None
+    temperature: Optional[float] = None
 
 
 class HydeRequest(BaseModel):
@@ -82,10 +83,10 @@ class HydeRequest(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_llm():
+def _get_llm(temperature: Optional[float] = None):
     model_name = os.environ["VLLM_MODEL"]
     base_url = os.environ["VLLM_BASE_URL"]
-    temperature = float(os.environ["TEMPERATURE"])
+    temperature = float(os.environ["TEMPERATURE"]) if temperature is None else temperature
     max_tokens = int(os.environ["MAX_NEW_TOKENS"])
     top_p = float(os.environ["TOP_P"])
     frequency_penalty = float(os.environ["FREQUENCY_PENALTY"])
@@ -239,7 +240,7 @@ def generate_hyde(req: HydeRequest):
 @app.post("/generate")
 def generate(req: GenerateRequest):
     """Assemble the RAG prompt and stream the answer token-by-token as SSE."""
-    llm, model_name = _get_llm()
+    llm, model_name = _get_llm(req.temperature)
     max_new_tokens = int(os.environ["MAX_NEW_TOKENS"])
     max_context_length = int(os.environ["VLLM_MAX_CONTEXT"])
 
