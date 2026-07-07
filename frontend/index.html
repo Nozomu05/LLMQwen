@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLMQwen Test Console</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <h1>LLMQwen Test Console</h1>
+
+      <div id="controls">
+        <label>
+          Backend URL
+          <input type="text" id="backend-url" size="28" placeholder="http://localhost:8010">
+        </label>
+
+        <label>
+          Agent
+          <select id="agent-select"><option>Loading…</option></select>
+        </label>
+
+        <label>
+          Temperature
+          <input type="range" id="temperature" min="0" max="1" step="0.05" value="0.1">
+          <span id="temperature-value">0.10</span>
+        </label>
+
+        <button id="reload-agents-btn" title="POST /agents/reload on search + llm services">
+          Reload agents
+        </button>
+
+        <button id="new-conversation-btn" title="Clear chat + history">
+          New conversation
+        </button>
+      </div>
+    </header>
+
+    <div id="agent-info"></div>
+
+    <main id="chat"></main>
+
+    <footer id="composer">
+      <div id="attachments"></div>
+      <form id="compose-form">
+        <button type="button" id="attach-btn" title="Attach a document (uses /extract)">📎</button>
+        <input type="file" id="file-input" hidden>
+        <textarea id="message-input" placeholder="Ask something…" rows="1"></textarea>
+        <button type="submit" id="send-btn">Send</button>
+        <button type="button" id="stop-btn" hidden>Stop</button>
+      </form>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -60,8 +60,11 @@ services:
         required: false
     environment:
       - VLLM_BASE_URL=http://host.docker.internal:8000
+      - AGENTS_DB_PATH=/app/storage/agents.db
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - ./storage:/app/storage
     networks:
       - rag-net
 
@@ -109,6 +112,7 @@ services:
       - CHROMA_DIR=/app/storage/chroma
       - HF_CACHE_DIR=/cache/huggingface
       - HF_HOME=/cache/huggingface
+      - AGENTS_DB_PATH=/app/storage/agents.db
     volumes:
       - ./storage:/app/storage
       - hf-cache:/cache/huggingface

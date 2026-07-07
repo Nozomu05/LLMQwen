@@ -4,6 +4,11 @@
 #   2. LLM service       (CPU,                port 8012)
 #   3. Reranker service  (GPU 0 - RTX 2080Ti, port 8011)
 #   4. Search service    (GPU 0 - RTX 2080Ti, port 8010)
+#   5. SearXNG            (CPU,               port 8899) — web search backend,
+#      bare-metal (no Docker); see searxng/setup.sh for one-time setup
+#   6. Frontend           (CPU,               port 8013) — plain HTML/JS test
+#      console (frontend/), served standalone so it isn't affected by
+#      whatever port-forwarding/preview behavior the backend API ports get
 #
 # Each process runs in its own tmux pane so you can monitor logs separately.
 # Requires tmux. Run with:
@@ -23,6 +28,7 @@ MAX_SEQS="${VLLM_MAX_SEQS:-15}"
 LLM_SVC_PORT="${LLM_SERVICE_PORT:-8012}"
 RERANKER_SVC_PORT="${RERANKER_SERVICE_PORT:-8011}"
 SEARCH_SVC_PORT="${SEARCH_SERVICE_PORT:-8010}"
+FRONTEND_PORT="${FRONTEND_PORT:-8013}"
 
 SESSION="rag"
 
@@ -87,13 +93,32 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID \\
 uvicorn services.search.app:app --host 0.0.0.0 --port $SEARCH_SVC_PORT
 " Enter
 
+# ── Window 4: SearXNG (web search backend) ────────────────────────────────
+SEARXNG_PORT="${SEARXNG_PORT:-8899}"
+tmux new-window -t "$SESSION" -n "searxng-svc"
+tmux send-keys -t "$SESSION:searxng-svc" "
+cd '$SCRIPT_DIR'
+echo '=== SearXNG (port $SEARXNG_PORT) ==='
+bash searxng/run.sh
+" Enter
+
+# ── Window 5: Frontend test console (static files, standalone) ───────────
+tmux new-window -t "$SESSION" -n "frontend-svc"
+tmux send-keys -t "$SESSION:frontend-svc" "
+cd '$SCRIPT_DIR/frontend'
+echo '=== Frontend test console (port $FRONTEND_PORT) ==='
+python3 -m http.server $FRONTEND_PORT
+" Enter
+
 echo "All services starting in tmux session '$SESSION'."
 echo ""
 echo "Attach with:  tmux attach -t $SESSION"
-echo "Switch panes: Ctrl-b then 0=vllm  1=llm-svc  2=reranker-svc  3=search-svc"
+echo "Switch panes: Ctrl-b then 0=vllm  1=llm-svc  2=reranker-svc  3=search-svc  4=searxng-svc  5=frontend-svc"
 echo ""
 echo "Service URLs:"
 echo "  vLLM server      : http://localhost:$VLLM_PORT"
 echo "  LLM service      : http://localhost:$LLM_SVC_PORT"
 echo "  Reranker service : http://localhost:$RERANKER_SVC_PORT"
 echo "  Search service   : http://localhost:$SEARCH_SVC_PORT"
+echo "  SearXNG          : http://localhost:$SEARXNG_PORT"
+echo "  Frontend console : http://localhost:$FRONTEND_PORT"

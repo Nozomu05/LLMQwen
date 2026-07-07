@@ -16,6 +16,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install git-filter-repo
+        run: pip install --quiet git-filter-repo
+
+      - name: Strip frontend/ from every commit
+        run: git filter-repo --path frontend --invert-paths --force
+
       - name: Push to GitLab
         run: |
           git remote add gitlab https://Minh:${{ secrets.GITLAB_TOKEN }}@abyss.int-evry.fr/software/Minh/LLMQwen.git

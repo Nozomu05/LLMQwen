@@ -1,11 +1,14 @@
 """Search Service — entry point for the RAG pipeline.
 
-Receives: POST /query  {"query", "documents", "temperature"}
+Receives: POST /query  {"query", "documents", "temperature", "agent_id", "history"}
 Flow:     language detection → translation → embedding → Chroma vector search
-          → POST /rerank (Reranker Service) → POST /generate (LLM Service)
+          (filtered to the agent's docs/ folder) → optional SearXNG web
+          search (if the agent has web_search enabled) → POST /rerank
+          (Reranker Service) → POST /generate (LLM Service)
 Returns:  {"answer", "model", "sources"}
 """
 import os
+import re
 import time
 import warnings
 from io import BytesIO
@@ -18,6 +21,8 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+from services.agents_config import DEFAULT_AGENT_ID, get_agent, list_agents, reload_agent, reload_all_agents
 
 warnings.filterwarnings(
     "ignore",
@@ -43,16 +48,35 @@ MAX_EXTRACT_CHARS = 20_000
 
 _LANG_INSTRUCTIONS = {
     "fr": "Réponds en français.",
-    "de": "Antworte auf Deutsch.",
-    "es": "Responde en español.",
-    "it": "Rispondi in italiano.",
-    "pt": "Responda em português.",
-    "nl": "Antwoord in het Nederlands.",
-    "zh": "请用中文回答。",
-    "ja": "日本語で答えてください。",
-    "ko": "한국어로 답하세요.",
-    "ar": "أجب باللغة العربية.",
+    "en": "Respond in English.",
 }
+
+# langdetect is a statistical, multi-language classifier and is unreliable on
+# short text — e.g. it misreads "courses"/"requirements" as French, and
+# "Qui est Marius Preda ?" as Romanian. Since we only ever need a binary
+# French/English call for the response language, a small dedicated heuristic
+# (accented characters + common French words) is more robust than trusting
+# langdetect's full N-language guess for short queries.
+_FRENCH_CHARS = set("àâçéèêëîïôùûüœ")
+_FRENCH_WORDS = {
+    "le", "la", "les", "un", "une", "des", "du", "de", "et", "est", "es", "suis",
+    "qui", "que", "quoi", "quel", "quels", "quelle", "quelles", "sont", "avez",
+    "peux", "peut", "pouvez", "voudrais", "aimerais", "cherche",
+    "comment", "pourquoi", "combien", "quand", "bonjour", "merci",
+    "vous", "nous", "je", "tu", "il", "elle", "avec", "pour", "dans", "sur",
+    "sans", "mais", "donc", "alors", "aussi",
+    "frais", "cours", "inscription", "bourse", "bourses", "logement",
+    "logements", "stage", "stages", "recherche", "semestre", "contact",
+    "contacter", "campus", "scolarite",
+}
+
+
+def _looks_french(text: str) -> bool:
+    lowered = text.lower()
+    if any(ch in _FRENCH_CHARS for ch in lowered):
+        return True
+    words = re.findall(r"[a-zà-ÿ']+", lowered)
+    return any(w in _FRENCH_WORDS for w in words)
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +92,17 @@ class QueryRequest(BaseModel):
     query: str
     documents: Optional[list[Document]] = None
     temperature: Optional[float] = None
+    agent_id: str = DEFAULT_AGENT_ID
+    # Prior conversation turns, [{"role": "user"|"assistant", "content": str}, ...].
+    # Passed straight through to the LLM service for context — deliberately
+    # NOT used for vector/web search, which stay scoped to the current query
+    # alone (concatenating history into the search text is what broke
+    # retrieval before: it searched for the whole conversation, not the question).
+    history: Optional[list[dict]] = None
+
+
+class ReloadAgentsRequest(BaseModel):
+    agent_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -102,19 +137,29 @@ def _get_embeddings():
 
 
 def _detect_language(text: str) -> tuple[str, str]:
-    """Return (lang_code, response_hint)."""
+    """Return (lang_code, response_hint).
+
+    The chatbot only ever answers in French or English: French if the
+    question is detected as French, English for every other language. The
+    response-language call uses _looks_french() rather than langdetect,
+    which is unreliable on short queries (see _looks_french's docstring).
+
+    `lang_code` still comes from langdetect and reflects the actual detected
+    language — used elsewhere to decide whether to translate the retrieval
+    query to English. Being wrong there is low-stakes (mistranslating
+    English to English is a no-op), unlike being wrong about which language
+    to respond in, so it doesn't need the same override.
+    """
+    if _looks_french(text):
+        return "fr", f" ({_LANG_INSTRUCTIONS['fr']})"
     try:
         from langdetect import detect
         lang_code = detect(text)
-        if lang_code == "en":
-            return "en", ""
-        hint = _LANG_INSTRUCTIONS.get(
-            lang_code,
-            f"Respond in the same language as the question ({lang_code}).",
-        )
-        return lang_code, f" ({hint})"
     except Exception:
         return "en", ""
+    if lang_code == "en":
+        return "en", ""
+    return lang_code, f" ({_LANG_INSTRUCTIONS['en']})"
 
 
 def _translate_to_english(text: str) -> str:
@@ -184,8 +229,9 @@ def _extract_text_from_bytes(filename: str, file_bytes: bytes) -> str:
     return text
 
 
-def _vector_search(retrieval_query: str) -> list[dict]:
-    """Embed the retrieval query and search the Chroma index."""
+def _vector_search(retrieval_query: str, agent_folder: str) -> list[dict]:
+    """Embed the retrieval query and search the Chroma index, restricted to
+    chunks tagged with `agent_folder` (the docs/ subfolder the agent owns)."""
     k_total = int(os.environ["RETRIEVAL_CHUNKS"])
     vs = _get_vectorstore()
 
@@ -197,11 +243,68 @@ def _vector_search(retrieval_query: str) -> list[dict]:
             f"Query: {retrieval_query}"
         )
 
-    docs = vs.as_retriever(search_kwargs={"k": k_total}).invoke(retrieval_query)
+    docs = vs.as_retriever(
+        search_kwargs={"k": k_total, "filter": {"agent": agent_folder}}
+    ).invoke(retrieval_query)
     return [
-        {"content": d.page_content, "source": d.metadata.get("source", "unknown")}
+        {"content": d.page_content, "source": d.metadata.get("source", "unknown"), "origin": "document"}
         for d in docs
     ]
+
+
+_WEB_SEARCH_CACHE: dict = {}
+_WEB_SEARCH_CACHE_TTL = 300  # seconds
+
+
+def _web_search(query: str, context: str = "") -> list[dict]:
+    """Search the web via a local SearXNG instance and return results shaped
+    like vector-search chunks (content + source URL), so they flow through
+    the same reranking and [Source: ...] citation path as document chunks.
+
+    `context` is an agent-specific scoping phrase (e.g. "Télécom SudParis",
+    from the agent's web_search_context in the database) appended to the
+    query so results stay on-topic instead of drifting to whatever else the
+    bare user query happens to match on the open web.
+
+    SearXNG aggregates multiple engines (Google, Startpage, DuckDuckGo, ...)
+    per query, so one engine having a bad moment doesn't sink the whole
+    result set the way a single-source scraper can. Results are still
+    cached for a few minutes so repeated identical questions don't refetch.
+
+    This always fails soft (empty list, logged) instead of raising, so an
+    unreachable SearXNG instance never breaks the whole /query request for
+    agents that don't strictly need it.
+    """
+    scoped_query = f"{query} {context}".strip() if context else query
+
+    cached = _WEB_SEARCH_CACHE.get(scoped_query)
+    if cached and time.time() - cached[0] < _WEB_SEARCH_CACHE_TTL:
+        return cached[1]
+
+    try:
+        searxng_url = os.environ["SEARXNG_URL"]
+        n_results = int(os.environ.get("WEB_SEARCH_RESULTS", "5"))
+        resp = requests.get(
+            f"{searxng_url}/search",
+            params={"q": scoped_query, "format": "json"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])[:n_results]
+        chunks = [
+            {
+                "content": f"{r.get('title', '')}\n{r.get('content', '')}".strip(),
+                "source": r["url"],
+                "origin": "web",
+            }
+            for r in results
+            if r.get("url")
+        ]
+        _WEB_SEARCH_CACHE[scoped_query] = (time.time(), chunks)
+        return chunks
+    except Exception as exc:
+        print(f"[search] web search failed: {exc}")
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +329,34 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/agents")
+def agents():
+    """List every agent (id, name, profession, department, web_search) for
+    UIs to populate an agent selector dynamically."""
+    return {"agents": list_agents()}
+
+
+@app.post("/agents/reload")
+def reload_agents(req: ReloadAgentsRequest):
+    """Drop cached agent folder mapping(s) so the next request re-reads them
+    from the database, and cascade the same reload to the LLM service so a
+    single call refreshes both cache layers (folder/web_search here, persona
+    system_prompt there)."""
+    if req.agent_id:
+        reload_agent(req.agent_id)
+    else:
+        reload_all_agents()
+    try:
+        requests.post(
+            f"{os.environ['LLM_SERVICE_URL']}/agents/reload",
+            json={"agent_id": req.agent_id},
+            timeout=10,
+        )
+    except Exception as exc:
+        print(f"[search] failed to cascade agent reload to LLM service: {exc}")
+    return {"status": "ok"}
+
+
 @app.post("/extract")
 async def extract(file: UploadFile = File(...)):
     """Extract plain text from an uploaded PDF/DOCX/PPTX/XLSX file for use as a query document."""
@@ -238,10 +369,13 @@ async def extract(file: UploadFile = File(...)):
 def query(req: QueryRequest):
     """Full RAG entry point: search → rerank → generate."""
     t_start = time.time()
+    print(f"[search] /query: temperature={req.temperature!r} agent_id={req.agent_id!r} query={req.query!r}")
 
     reranker_url = os.environ["RERANKER_SERVICE_URL"]
     llm_url = os.environ["LLM_SERVICE_URL"]
 
+    agent = get_agent(req.agent_id)
+    agent_folder = agent["folder"]
     lang_code, lang_hint = _detect_language(req.query)
 
     # Determine the retrieval query and the reranking query
@@ -271,10 +405,16 @@ def query(req: QueryRequest):
 
     try:
         t_search = time.time()
-        chunks = _vector_search(retrieval_query)
+        chunks = _vector_search(retrieval_query, agent_folder)
         print(f"[search] vector search: {time.time() - t_search:.2f}s — {len(chunks)} chunks retrieved")
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+    if agent["web_search"]:
+        t_web = time.time()
+        web_chunks = _web_search(req.query, agent["web_search_context"])
+        print(f"[search] web search: {time.time() - t_web:.2f}s — {len(web_chunks)} results")
+        chunks = chunks + web_chunks
 
     extra_docs = None
     if req.documents:
@@ -287,6 +427,8 @@ def query(req: QueryRequest):
         "lang_hint": lang_hint,
         "extra_docs": extra_docs,
         "temperature": req.temperature,
+        "agent_id": req.agent_id,
+        "history": req.history,
     }
 
     def proxy_stream():

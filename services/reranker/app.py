@@ -1,6 +1,6 @@
 """Reranker Service — CrossEncoder scoring, then forwards to LLM service.
 
-Receives: POST /rerank  {"query", "chunks", "rerank_query", "lang_hint", "extra_docs", "temperature"}
+Receives: POST /rerank  {"query", "chunks", "rerank_query", "lang_hint", "extra_docs", "temperature", "agent_id", "history"}
 Returns:  {"answer", "model", "sources"}  (passed through from LLM service)
 """
 import os
@@ -13,6 +13,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sentence_transformers import CrossEncoder
+
+from services.agents_config import DEFAULT_AGENT_ID
 
 load_dotenv(override=True)
 
@@ -28,6 +30,7 @@ _RERANKER_CACHE: dict = {}
 class Chunk(BaseModel):
     content: str
     source: str
+    origin: str = "document"  # "document" (vector store) or "web" (SearXNG) — see services/llm/app.py's _format_chunks
 
 
 class RerankRequest(BaseModel):
@@ -37,6 +40,8 @@ class RerankRequest(BaseModel):
     lang_hint: str = ""
     extra_docs: Optional[list[dict]] = None
     temperature: Optional[float] = None
+    agent_id: str = DEFAULT_AGENT_ID
+    history: Optional[list[dict]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +100,7 @@ def rerank(req: RerankRequest):
     t_rerank_done = time.time()
     print(f"[reranker] scoring {len(req.chunks)} chunks → top {len(chunks)}: {t_rerank_done - t_start:.2f}s")
 
-    chunks_payload = [{"content": c.content, "source": c.source} for c in chunks]
+    chunks_payload = [{"content": c.content, "source": c.source, "origin": c.origin} for c in chunks]
 
     def proxy_stream():
         t_llm = time.time()
@@ -108,6 +113,8 @@ def rerank(req: RerankRequest):
                     "lang_hint": req.lang_hint,
                     "extra_docs": req.extra_docs,
                     "temperature": req.temperature,
+                    "agent_id": req.agent_id,
+                    "history": req.history,
                 },
                 stream=True,
                 timeout=120,

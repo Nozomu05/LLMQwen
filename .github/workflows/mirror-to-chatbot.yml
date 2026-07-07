@@ -1,0 +1,29 @@
+name: Mirror to chatbot repo
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - '**'
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install git-filter-repo
+        run: pip install --quiet git-filter-repo
+
+      - name: Strip .github/workflows/ from every commit
+        run: git filter-repo --path .github/workflows --invert-paths --force
+
+      - name: Push to chatbot repo
+        run: |
+          git remote add chatbot https://x-access-token:${{ secrets.CHATBOT_REPO_TOKEN }}@github.com/Nozomu05/chatbot.git
+          git push chatbot --all --force
+          git push chatbot --tags --force

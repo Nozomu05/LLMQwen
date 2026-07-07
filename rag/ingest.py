@@ -337,6 +337,43 @@ def load_excel(file_path: str) -> List[Document]:
     return docs
 
 
+_CRAWL_PAGE_RE = re.compile(
+    r'<a name="page-\d+"></a>\s*\n+##\s+(?P<title>[^\n]*)\n+>\s*\*\*URL:\*\*\s*(?P<url>\S+)\s*\n+(?P<body>.*?)(?=<a name="page-\d+"></a>|\Z)',
+    re.DOTALL,
+)
+
+
+def load_crawled_pages(file_path: str) -> List[Document]:
+    """Load a multi-page website crawl (produced by the site-extraction tool
+    that writes '<a name="page-N"></a> / ## Title / > **URL:** ...' blocks
+    for each crawled page) as one Document per page.
+
+    Tagging each page with its real URL (instead of the crawl's filename)
+    lets the LLM cite the exact source page for each point in its answer.
+    """
+    with open(file_path, encoding="utf-8") as f:
+        text = f.read()
+
+    if '<a name="page-1"></a>' not in text:
+        raise ValueError("Not a crawled-pages file")
+
+    docs: List[Document] = []
+    for m in _CRAWL_PAGE_RE.finditer(text):
+        title = m.group("title").strip()
+        url = m.group("url").strip()
+        body = m.group("body").strip()
+        if not body:
+            continue
+        docs.append(Document(
+            page_content=f"# {title}\n\n{body}",
+            metadata={"source": url, "title": title},
+        ))
+
+    if not docs:
+        raise ValueError("No pages extracted from crawled file")
+    return docs
+
+
 def load_csv(file_path: str) -> List[Document]:
     """Load .csv files, converting tabular content to text."""
     source = Path(file_path).name
@@ -416,6 +453,22 @@ def extract_zip_files(docs_dir: Path) -> None:
     
     print()
 
+def _tag_agent_folder(docs: List[Document], file_path: Path, docs_dir: Path) -> None:
+    """Tag each document with the name of the immediate subfolder it lives in
+    under DOCS_DIR (e.g. docs/TSP/foo.pdf -> metadata["agent"] = "TSP").
+
+    The search service filters retrieval on this field so each chatbot
+    "agent" only ever sees chunks from its own docs/<folder>. Files placed
+    directly in DOCS_DIR (no subfolder) are left untagged and won't be
+    retrieved by any agent-filtered query.
+    """
+    rel_parts = file_path.relative_to(docs_dir).parts
+    if len(rel_parts) < 2:
+        return
+    for doc in docs:
+        doc.metadata["agent"] = rel_parts[0]
+
+
 def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> tuple[List[Document], dict]:
     all_docs = []
     stats = {
@@ -459,6 +512,7 @@ def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> tuple[List[Doc
         ], "Markdown"),
         
         ("**/*.txt", [
+            ("CrawledPages", lambda p: load_crawled_pages(p)),
             ("TextLoader-utf8", lambda p: TextLoader(p, encoding='utf-8')),
             ("TextLoader-latin1", lambda p: TextLoader(p, encoding='latin-1')),
             ("TextLoader-auto", lambda p: TextLoader(p, autodetect_encoding=True))
@@ -597,8 +651,9 @@ def load_documents_batch(docs_dir: Path, batch_size: int = 50) -> tuple[List[Doc
         
         for file_path in valid_files:
             filename, docs, method = load_single_file(file_path, loader_strategies)
-            
+
             if method != "FAILED" and docs:
+                _tag_agent_folder(docs, file_path, docs_dir)
                 all_docs.extend(docs)
                 successful_count += 1
                 stats['successful'].append({

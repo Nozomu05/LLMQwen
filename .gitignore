@@ -45,11 +45,19 @@ storage/.ingest_cache.json
 ingestion_errors.log
 tempdocs/
 
+# SearXNG (bare-metal web search backend, set up by searxng/setup.sh) —
+# vendored upstream source and its venv are not tracked, only our own config
+searxng/src/
+searxng/.venv/
+
 # Office temporary files
 ~$*
-# Ignore everything inside docs/ but track the folder via .gitkeep
+# Ignore everything inside docs/ but track each agent subfolder via .gitkeep
 docs/*
+!docs/*/
+docs/*/*
 !docs/.gitkeep
+!docs/*/.gitkeep
 # Ignore everything inside storage/ but not the folder itself
 storage/*
 !storage/

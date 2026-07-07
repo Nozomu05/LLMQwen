@@ -1,0 +1,34 @@
+# Minimal overrides on top of SearXNG's built-in defaults (use_default_settings
+# merges this file with them, so we don't need to hand-maintain a full config).
+#
+# This instance is only ever called by services/search/app.py's internal
+# _web_search() over localhost — it is not a public-facing search engine,
+# hence limiter/rate-limiting is disabled.
+use_default_settings:
+  engines:
+    remove:
+      # Ships with a hardcoded, shared CX id used by every SearXNG install
+      # that doesn't configure its own — Google rate-limits it almost
+      # constantly regardless of our own traffic (searx/engines/google_cse.py).
+      # Not a misconfiguration on our end, just permanently unreliable.
+      - google cse
+      - google cse images
+
+general:
+  instance_name: "LLMQwen internal search"
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json   # disabled by default upstream — required for our JSON API calls
+
+server:
+  secret_key: "647c6bd200a64f479e84e44b7c5dbc7a3c706c51b0d18512ba1e7307f7f6243d"
+  limiter: false
+  image_proxy: false
+
+outgoing:
+  # Default (3s) is too tight for some engines (e.g. wikidata) under normal
+  # network conditions and causes frequent spurious timeouts.
+  request_timeout: 8.0
